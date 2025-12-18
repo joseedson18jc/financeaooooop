@@ -349,6 +349,9 @@ def get_initial_mappings() -> List[MappingItem]:
         m("Tech Support & Services", "COMPANYHERO", 68, "Despesa", "Company Hero"),
         m("Tech Support & Services", "Diversos", 65, "Despesa", "Tech Support - Generic"),
         
+        # Tech Support (alternative naming - both map to same line 65 intentionally)
+        m("Tech Support", "Diversos", 65, "Despesa", "Tech Support - Alternative Naming"),
+        
         # OTHER EXPENSES / TAXES
         # Legal & Accounting
         m("Legal & Accounting Expenses", "BHUB.AI", 90, "Despesa", "BPO Financeiro"),
@@ -695,9 +698,9 @@ def get_dashboard_data(df: pd.DataFrame, mappings: List[MappingItem], overrides:
     
     net_result = total_ebitda  # Simplified calculation (validated)
     
-    # Avoid division by zero
-    ebitda_margin = (total_ebitda / total_revenue) if total_revenue > 0 else 0.0
-    gross_margin = (total_gross_profit / total_revenue) if total_revenue > 0 else 0.0
+    # Avoid division by zero - calculate margins as percentages
+    ebitda_margin = (total_ebitda / total_revenue) * 100 if total_revenue > 0 else 0.0
+    gross_margin = (total_gross_profit / total_revenue) * 100 if total_revenue > 0 else 0.0
     
     # KPIs
     kpis = {
