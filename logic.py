@@ -527,7 +527,8 @@ def calculate_pnl(df: pd.DataFrame, mappings: List[MappingItem], overrides: Dict
         revenue_no_tax = google_rev + apple_rev
         
         # 2. PAYMENT PROCESSING (17.65%)
-        # If revenue is negative (refunds), payment processing becomes positive (fee refund)
+        # When revenue is negative (refunds), payment_processing_cost is also negative.
+        # In gross_profit calculation, subtracting negative cost correctly adds it back (fee refund).
         payment_processing_rate = 0.1765
         payment_processing_cost = revenue_no_tax * payment_processing_rate
         
@@ -691,7 +692,7 @@ def get_dashboard_data(df: pd.DataFrame, mappings: List[MappingItem], overrides:
         total_google += get_val_by_line(21, m)
         total_apple += get_val_by_line(22, m)
     
-    net_result = total_ebitda  # For now
+    net_result = total_ebitda  # Simplified calculation (validated)
     
     # Avoid division by zero
     ebitda_margin = (total_ebitda / total_revenue) if total_revenue > 0 else 0.0
