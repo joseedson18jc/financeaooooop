@@ -1,3 +1,33 @@
+"""
+Financial Data Processing and P&L Calculation Module.
+
+This module provides core business logic for processing financial transactions from
+Conta Azul (Brazilian accounting system) and generating Profit & Loss (P&L) statements,
+dashboards, and financial forecasts.
+
+Main Components:
+    - CSV data parsing and normalization (multiple encodings, formats)
+    - Transaction categorization and mapping to P&L lines
+    - Financial calculations (revenue, costs, EBITDA, margins)
+    - Dashboard KPI generation
+    - Linear regression-based financial forecasting
+
+Dependencies:
+    - pandas: Data manipulation and analysis
+    - numpy: Numerical computations
+    - sklearn: Machine learning for forecasting
+    - models: Data models (MappingItem, PnLItem, PnLResponse, DashboardData)
+
+Side Effects:
+    - Logging of financial calculations and warnings
+    - No direct file I/O (data passed as bytes/DataFrames)
+
+Currency Assumptions:
+    - All monetary values in Brazilian Reais (BRL/R$)
+    - Values stored as float64 with 2 decimal places precision
+    - Payment processing rate hardcoded at 17.65%
+"""
+
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import LinearRegression
@@ -15,7 +45,35 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 
 def process_upload(file_content: bytes) -> pd.DataFrame:
     """
-    Process the uploaded CSV file from Conta Azul.
+    Process and normalize uploaded CSV file from Conta Azul accounting system.
+    
+    Handles multiple CSV formats, encodings, and separator types commonly exported
+    by Conta Azul. Performs data cleaning, normalization, and validation to ensure
+    consistent processing downstream.
+    
+    Args:
+        file_content: Raw CSV file content as bytes.
+        
+    Returns:
+        Processed DataFrame with normalized columns and computed fields:
+            - Data de competência: Parsed datetime
+            - Valor_Num: Numeric value with correct sign (+ for revenue, - for expense)
+            - Mes_Competencia: Month period for aggregation
+            - Centro de Custo 1: Normalized cost center
+            - Nome do fornecedor/cliente: Normalized supplier/client name
+            
+    Raises:
+        ValueError: If file cannot be parsed or missing required columns.
+        
+    Side Effects:
+        - Prints parsing attempts and column mappings to stdout
+        - Logs tipo normalization statistics
+        
+    Notes:
+        - Tries multiple encoding/separator combinations automatically
+        - Handles Brazilian number format (1.234,56)
+        - Enforces payroll transactions to 'Wages Expenses' cost center
+        - Preserves sign based on 'Tipo' column (Entrada/Saída)
     """
     # Try different encodings and separators
     df = None
@@ -227,8 +285,32 @@ def process_upload(file_content: bytes) -> pd.DataFrame:
 
 def get_initial_mappings() -> List[MappingItem]:
     """
-    Returns the initial hardcoded mappings.
-    Now includes generic fallbacks and coverage for Taxes, Refunds, etc.
+    Return predefined mappings from cost centers/suppliers to P&L line items.
+    
+    Defines how transactions from Conta Azul are categorized into specific P&L
+    statement lines. Includes both specific mappings (cost center + supplier)
+    and generic fallback mappings (cost center + "Diversos").
+    
+    Returns:
+        List of MappingItem objects containing:
+            - grupo_financeiro: Financial group name
+            - centro_custo: Cost center from Conta Azul
+            - fornecedor_cliente: Supplier/client name (or "Diversos" for generic)
+            - linha_pl: P&L line number (as string)
+            - tipo: Transaction type (Receita/Custo/Despesa)
+            - ativo: Active status ("Sim")
+            - observacoes: Human-readable description
+            
+    Notes:
+        - Line 25: Google Play Revenue
+        - Line 33: App Store Revenue
+        - Line 38: Investment Income
+        - Line 43-48: Web Services COGS
+        - Line 56: Marketing Expenses
+        - Line 62: Wages/Salaries
+        - Line 68: Tech Support
+        - Line 90: Other Expenses (Legal, Accounting, Office, Taxes, etc.)
+        - Generic "Diversos" mappings serve as fallbacks when specific supplier not matched
     """
     # Helper to condense definition
     def m(cc, supp, line, tipo, obs):
@@ -304,7 +386,26 @@ def get_initial_mappings() -> List[MappingItem]:
     return mappings
 
 def normalize_text_helper(s: Any) -> str:
-    # Helper outside process_upload for use in calculate_pnl
+    """
+    Normalize text for consistent case-insensitive matching.
+    
+    Converts to lowercase, strips whitespace, and removes diacritical marks
+    (accents) to enable robust fuzzy matching of cost centers and supplier names.
+    
+    Args:
+        s: Input string or value to normalize (can be NaN, None, or any type).
+        
+    Returns:
+        Normalized lowercase string without accents, or empty string for NaN/None.
+        
+    Examples:
+        >>> normalize_text_helper("São Paulo  ")
+        'sao paulo'
+        >>> normalize_text_helper("TÉCNICO")
+        'tecnico'
+        >>> normalize_text_helper(None)
+        ''
+    """
     if pd.isna(s):
         return ""
     s = str(s).strip().lower()
@@ -312,6 +413,27 @@ def normalize_text_helper(s: Any) -> str:
     return "".join(ch for ch in s if not unicodedata.combining(ch))
 
 def prepare_mappings(mappings: List[MappingItem]):
+    """
+    Optimize mappings for fast lookup during P&L calculation.
+    
+    Separates mappings into two categories for efficient matching:
+    1. Specific mappings: cost center + specific supplier
+    2. Generic mappings: cost center + "Diversos" (fallback)
+    
+    Args:
+        mappings: List of MappingItem objects from get_initial_mappings().
+        
+    Returns:
+        Tuple of (specific_by_cc, generic_by_cc):
+            - specific_by_cc: Dict[str, List[MappingItem]] indexed by normalized cost center,
+              sorted by supplier name length (longest first for most specific match)
+            - generic_by_cc: Dict[str, MappingItem] indexed by normalized cost center
+              
+    Notes:
+        - O(1) lookup by cost center instead of O(n) linear search
+        - Longest supplier match first prevents "AWS" matching "AWS SES"
+        - Generic mappings provide fallback when specific supplier not found
+    """
     from collections import defaultdict
     
     # Use defaultdict(list) for specific mappings to handle multiple patterns for same CC
@@ -337,8 +459,48 @@ def prepare_mappings(mappings: List[MappingItem]):
 
 def calculate_pnl(df: pd.DataFrame, mappings: List[MappingItem], overrides: Dict[str, Dict[str, float]] = None, start_date: str = None, end_date: str = None) -> PnLResponse:
     """
-    Calculate P&L based on dataframe and mappings.
-    Optionally filter by date range.
+    Calculate comprehensive Profit & Loss statement from transaction data.
+    
+    Maps transactions to P&L line items, aggregates by month, computes derived
+    financial metrics (EBITDA, margins, etc.), and formats for display.
+    
+    Args:
+        df: Processed DataFrame from process_upload() with transaction data.
+        mappings: List of MappingItem objects defining cost center to P&L line mappings.
+        overrides: Optional manual overrides for specific lines and months.
+            Format: {"line_num": {"month_str": value}}
+            Only lines 100 (Revenue), 106 (EBITDA), 111 (Net Result) allowed.
+        start_date: Optional ISO date string (YYYY-MM-DD) for filtering.
+        end_date: Optional ISO date string (YYYY-MM-DD) for filtering.
+        
+    Returns:
+        PnLResponse containing:
+            - headers: List of month strings (YYYY-MM format)
+            - rows: List of PnLItem objects with line details and monthly values
+            
+    Raises:
+        No exceptions raised; returns empty response if df is None/empty.
+        
+    Side Effects:
+        - Logs monthly totals (Revenue, EBITDA) at INFO level
+        - Logs large matches (>R$20k) at INFO level for debugging
+        - Logs unmapped significant items (>R$10k) at DEBUG level
+        
+    Financial Calculations:
+        1. Total Revenue = Google + Apple + Investment Income
+        2. Payment Processing = Revenue (no tax) × 17.65%
+        3. COGS = Web Services expenses
+        4. Gross Profit = Revenue - Payment Processing - COGS
+        5. SG&A = Marketing + Wages + Tech Support
+        6. Total OpEx = SG&A + Other Expenses
+        7. EBITDA = Gross Profit - Total OpEx
+        8. Net Result = EBITDA (simplified, no D&A or taxes)
+        
+    Notes:
+        - Revenue values preserve sign (negative for refunds/chargebacks)
+        - Expenses displayed as negative in P&L
+        - Margins calculated as percentage of total revenue
+        - Unmapped transactions are ignored (logged at DEBUG level)
     """
     if df is None or df.empty:
         return PnLResponse(headers=[], rows=[])
@@ -581,6 +743,48 @@ def calculate_pnl(df: pd.DataFrame, mappings: List[MappingItem], overrides: Dict
 
     return PnLResponse(headers=month_strs, rows=rows)
 def get_dashboard_data(df: pd.DataFrame, mappings: List[MappingItem], overrides: Dict[str, Dict[str, float]] = None) -> DashboardData:
+    """
+    Generate dashboard metrics and visualizations data from P&L.
+    
+    Aggregates P&L data into year-to-date KPIs, monthly trends, and cost structure
+    breakdown for dashboard display.
+    
+    Args:
+        df: Processed DataFrame from process_upload().
+        mappings: List of MappingItem objects.
+        overrides: Optional manual overrides (same format as calculate_pnl).
+        
+    Returns:
+        DashboardData containing:
+            - kpis: Dict with YTD aggregated metrics:
+                * total_revenue: Sum across all months
+                * net_result: Sum of net results
+                * ebitda: Sum of EBITDA
+                * ebitda_margin: Percentage (EBITDA / Revenue)
+                * gross_margin: Percentage (Gross Profit / Revenue)
+                * google_revenue: Sum of Google Play revenue
+                * apple_revenue: Sum of App Store revenue
+                * nau: Placeholder (0)
+                * cpa: Placeholder (0)
+            - monthly_data: List of dicts with per-month breakdown:
+                * month: Month string (YYYY-MM)
+                * revenue: Revenue for month
+                * ebitda: EBITDA for month
+                * costs: COGS (absolute value for positive display)
+                * expenses: OpEx (absolute value for positive display)
+            - cost_structure: Dict with latest month breakdown (absolute values):
+                * payment_processing: Payment processing fees
+                * cogs: Web services costs
+                * marketing: Marketing expenses
+                * wages: Salary expenses
+                * tech: Tech support expenses
+                * other: Other expenses
+                
+    Notes:
+        - Returns empty structure if df is None
+        - All cost/expense values converted to positive for chart display
+        - Finds latest month with non-zero revenue for cost structure
+    """
     if df is None:
         return DashboardData(kpis={}, monthly_data=[], cost_structure={})
         
@@ -688,7 +892,35 @@ def get_dashboard_data(df: pd.DataFrame, mappings: List[MappingItem], overrides:
 
 def calculate_forecast(df: pd.DataFrame, mappings: List[MappingItem], overrides: Dict[str, Dict[str, float]] = None, months_ahead: int = 3) -> Dict[str, Any]:
     """
-    Predict future financial metrics (Revenue, EBITDA) using Linear Regression.
+    Predict future financial metrics using linear regression on historical data.
+    
+    Trains separate linear models on revenue and EBITDA time series to forecast
+    future months. Useful for simple trend projection.
+    
+    Args:
+        df: Processed DataFrame from process_upload().
+        mappings: List of MappingItem objects.
+        overrides: Optional manual overrides (same format as calculate_pnl).
+        months_ahead: Number of future months to forecast (default: 3).
+        
+    Returns:
+        Dict containing:
+            - forecast: List of dicts with predictions:
+                * month: Future month string (YYYY-MM)
+                * revenue: Predicted revenue (minimum 0)
+                * ebitda: Predicted EBITDA
+                * is_forecast: Always True
+            - warning: Optional message if insufficient data (<3 months)
+            
+    Raises:
+        No exceptions; returns empty forecast list if insufficient data.
+        
+    Notes:
+        - Requires at least 3 historical months for reliable prediction
+        - Uses sklearn LinearRegression (simple least-squares fit)
+        - Revenue forecast clamped to non-negative values
+        - EBITDA forecast can be negative
+        - Simple linear model may not capture seasonality or non-linear trends
     """
     if df is None:
         return {"forecast": []}

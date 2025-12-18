@@ -1,6 +1,27 @@
 #!/usr/bin/env python3
 """
-Test script to verify CSV upload processing
+CSV Upload Processing Test Script.
+
+Command-line utility to verify that CSV file processing works correctly.
+Tests the process_upload function with a sample Conta Azul export file.
+
+Usage:
+    python test_upload.py
+    
+Requirements:
+    - Sample CSV file: "Extratodemovimentações-2025-ExtratoFinanceiro.csv"
+    - backend/logic.py module with process_upload function
+    
+Output:
+    - File statistics (size, rows, columns)
+    - Column names and data types
+    - Date range and total value summary
+    - Error messages with traceback if processing fails
+    
+Side Effects:
+    - Reads CSV file from current directory
+    - Prints results to stdout
+    - No modifications to files or database
 """
 import sys
 sys.path.insert(0, './backend')

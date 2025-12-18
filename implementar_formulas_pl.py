@@ -1,7 +1,41 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Implementar fórmulas SUMIFS e cálculos automáticos no P&L
+Excel P&L Formula Implementation Utility.
+
+Automates the addition of SUMIFS formulas and financial calculations to an
+Excel-based Business Plan P&L worksheet. Links imported transaction data
+to P&L line items via dynamic formulas.
+
+Purpose:
+    - Generate SUMIFS formulas to import transaction data from Extrato_Importado sheet
+    - Implement derived financial calculations (margins, growth rates, totals)
+    - Add EBITDA and profitability metrics
+    - Format cells with proper styles and number formats
+    
+Input:
+    - /home/ubuntu/Business_Plan_Umatch_Automatizado_v2.xlsx
+    - Expects worksheets: 'P&L', 'Extrato_Importado'
+    
+Output:
+    - /home/ubuntu/Business_Plan_Umatch_Automatizado_v3.xlsx
+    - P&L sheet with formulas for 18 months (historical + forecast)
+    
+Formula Types Generated:
+    1. SUMIFS: Import from Extrato_Importado by cost center, month, supplier
+    2. Calculations: Revenue aggregations, cost totals, margin ratios
+    3. Growth: Month-over-month percentage changes
+    4. Profitability: EBITDA, gross profit, operating income
+    
+Side Effects:
+    - Reads Excel workbook from filesystem
+    - Writes modified workbook to new file
+    - Prints progress messages to stdout
+    
+Dependencies:
+    - openpyxl: Excel file manipulation
+    - pandas: Date calculations
+    - dateutil: Relative date arithmetic
 """
 
 import pandas as pd

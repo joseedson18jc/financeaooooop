@@ -1,3 +1,27 @@
+"""
+P&L Transaction Drill-Down API Endpoint.
+
+This module provides a FastAPI endpoint for retrieving detailed transaction data
+that contributes to specific P&L line items. Enables drill-down analysis from
+summary P&L statements to individual transactions.
+
+Main Features:
+    - Transaction filtering by P&L line number
+    - Optional month filtering
+    - Authentication required via dependency injection
+    - Aggregates total value and transaction count
+
+Dependencies:
+    - FastAPI: Web framework for API endpoint
+    - pandas: Data manipulation
+    - auth: Authentication module (get_current_user)
+    - main: Access to current_df and current_mappings (global state)
+
+Side Effects:
+    - None (read-only access to shared data)
+    - Raises HTTPException for error conditions
+"""
+
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List, Optional
 import pandas as pd
@@ -13,20 +37,46 @@ async def get_pnl_line_transactions(
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Get all transactions that contribute to a specific P&L line.
+    Retrieve all transactions contributing to a specific P&L line item.
+    
+    Provides drill-down capability from P&L summary to individual transactions.
+    Filters transactions by cost center and supplier mappings associated with
+    the requested line number.
     
     Args:
-        line_number: The P&L line number (e.g., 9 for Marketing)
-        month: Optional month filter in format 'YYYY-MM' or integer month
+        line_number: P&L line number to query (e.g., 9 for Marketing, 25 for Google Revenue).
+        month: Optional month filter in format 'YYYY-MM' or integer month number.
+        current_user: Authenticated user object (injected by FastAPI dependency).
     
     Returns:
-        {
-            "line_number": int,
-            "description": str,
-            "month": str,
-            "total": float,
-            "transactions": [...]
-        }
+        Dict containing:
+            - line_number: Echoed line number
+            - description: Line description from mapping
+            - centro_custo_filter: Cost center used for filtering
+            - fornecedor_filter: Supplier/client used for filtering
+            - month: Month filter applied or "all"
+            - total: Sum of all transaction values (R$)
+            - count: Number of transactions found
+            - transactions: List of transaction dicts with:
+                * date: Transaction date (YYYY-MM-DD)
+                * month: Month period (YYYY-MM)
+                * centro_custo: Cost center
+                * fornecedor: Supplier/client name
+                * descricao: Transaction description
+                * valor: Transaction value (R$)
+                * categoria: Account category
+    
+    Raises:
+        HTTPException 404: If no data loaded in current_df
+        HTTPException 404: If no mapping found for requested line_number
+        
+    Side Effects:
+        - Accesses global state (current_df, current_mappings) from main module
+        
+    Notes:
+        - Filters by cost center (case-insensitive substring match)
+        - If supplier is not "Diversos", also filters by supplier (case-insensitive)
+        - All matched transactions aggregated and returned
     """
     from main import current_df, current_mappings
     
