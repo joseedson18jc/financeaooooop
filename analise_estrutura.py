@@ -1,7 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Análise da estrutura dos arquivos para automatização do Business Plan Umatch
+Financial Data Structure Analysis Utility.
+
+Analyzes the structure and content of exported financial files to support
+automation of the Umatch Business Plan. Generates a comprehensive report
+of cost centers, categories, suppliers, and temporal distribution.
+
+Purpose:
+    - Discover unique cost centers and categories in Conta Azul exports
+    - Map suppliers to cost centers for mapping configuration
+    - Analyze temporal distribution of transactions
+    - Export structured mapping reference in JSON format
+    
+Input Files (Expected):
+    - /home/ubuntu/upload/00_Business_Plan_Umatch.xlsx-P&L.csv
+    - /home/ubuntu/upload/00_Business_Plan_Umatch.xlsx-Assumptions.csv
+    - /home/ubuntu/upload/Extratodemovimentações-2025-ExtratoFinanceiro.csv
+    
+Output:
+    - Console report with statistics and breakdowns
+    - /home/ubuntu/estrutura_mapeamento.json (structured mapping reference)
+    
+Side Effects:
+    - Reads CSV files from /home/ubuntu/upload/
+    - Writes JSON file to /home/ubuntu/
+    - Prints analysis to stdout
+    
+Dependencies:
+    - pandas: Data analysis
+    - numpy: Numerical operations
+    - json: Export structured data
 """
 
 import pandas as pd

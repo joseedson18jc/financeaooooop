@@ -1,7 +1,45 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Adicionar aba P&L com fórmulas automáticas ao Business Plan
+Excel P&L Sheet Creation Utility.
+
+Creates a new P&L worksheet with automated formulas in an existing Business Plan
+Excel workbook. Provides comprehensive financial statement structure with styling,
+formatting, and calculation formulas.
+
+Purpose:
+    - Add P&L sheet as first tab in existing workbook
+    - Define month columns (18 months: 12 historical + 6 forecast)
+    - Create hierarchical P&L structure (Revenue → COGS → Gross Profit → OpEx → EBITDA)
+    - Apply professional styling (colors, fonts, borders, number formats)
+    - Set up editable cells for assumptions (yellow highlight)
+    
+Input:
+    - /home/ubuntu/Business_Plan_Umatch_Automatizado_v1.xlsx (existing workbook)
+    - /home/ubuntu/upload/00_Business_Plan_Umatch.xlsx-P&L.csv (structure reference)
+    
+Output:
+    - Modified workbook with new P&L sheet
+    - Sheet positioned as first tab (index 0)
+    
+Features:
+    - Category hierarchy with KPIs, Revenue, COGS, Gross Profit, OpEx, EBITDA
+    - Dynamic month headers starting from May 2024
+    - Color-coded sections (blue header, green revenue, red costs, yellow editable)
+    - Brazilian currency formatting (R$ #,##0.00)
+    - Percentage formatting for margins and growth rates
+    
+Side Effects:
+    - Reads Excel workbook and CSV file
+    - Creates new worksheet in workbook
+    - Writes modified workbook back to filesystem
+    - Prints progress to stdout
+    
+Dependencies:
+    - openpyxl: Excel manipulation with styling
+    - pandas: Data loading and date handling
+    - numpy: Numerical operations
+    - dateutil: Date arithmetic
 """
 
 import pandas as pd

@@ -1,4 +1,39 @@
 """
+Detailed Change Report for logic.py Bug Fixes.
+
+This documentation file provides a comprehensive analysis of critical bug fixes
+implemented in logic.py that resolved test failures and improved financial
+calculation accuracy.
+
+Purpose:
+    - Document the two critical changes made to fix failing tests
+    - Explain the root cause of each bug
+    - Show before/after code comparisons
+    - Demonstrate impact on test results and financial calculations
+    
+Changes Documented:
+    1. Cost Center Mapping Correction (Lines 262-263)
+       - Fixed Centro de Custo names to match Conta Azul exports
+       - Changed "Receita Google" → "Google Play Net Revenue"
+       - Changed "Receita Apple" → "App Store Net Revenue"
+       
+    2. Revenue Sign Preservation (Lines 456-459)
+       - Removed abs() calls that converted negative revenue to positive
+       - Preserves correct sign for refunds/chargebacks
+       - Enables proper fee refund calculations
+    
+Test Results:
+    - Before: 0/6 tests passing
+    - After: 6/6 tests passing (100% success)
+    
+Usage:
+    This is a documentation file. Run to display formatted report:
+        python diff_detalhado.py
+        
+Side Effects:
+    - Prints formatted documentation to stdout
+    - No file I/O or modifications
+    
 ═══════════════════════════════════════════════════════════════════════════════
 DIFF DETALHADO: MUDANÇAS IMPLEMENTADAS EM LOGIC.PY
 ═══════════════════════════════════════════════════════════════════════════════
