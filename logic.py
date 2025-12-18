@@ -82,6 +82,89 @@ def normalize_text_helper(s: Any) -> str:
     return "".join(ch for ch in s if not unicodedata.combining(ch))
 
 
+def normalize_cost_center(cc: str) -> str:
+    """
+    Normalize cost center name to canonical form, handling synonyms and variations.
+    
+    This function maps various cost center naming patterns to their canonical forms,
+    ensuring consistent matching regardless of minor variations in naming conventions.
+    
+    Args:
+        cc: Cost center name to normalize
+        
+    Returns:
+        Canonical normalized cost center name
+        
+    Examples:
+        >>> normalize_cost_center("Tech Support")
+        'tech support & services'
+        >>> normalize_cost_center("Tech Support & Services")
+        'tech support & services'
+        >>> normalize_cost_center("Marketing")
+        'marketing & growth expenses'
+    """
+    normalized = normalize_text_helper(cc)
+    
+    # Cost center synonym mappings - map variations to canonical forms
+    synonyms = {
+        # Tech Support variations
+        'tech support': 'tech support & services',
+        'technical support': 'tech support & services',
+        'tech services': 'tech support & services',
+        'support': 'tech support & services',
+        
+        # Marketing variations
+        'marketing': 'marketing & growth expenses',
+        'marketing expenses': 'marketing & growth expenses',
+        'growth expenses': 'marketing & growth expenses',
+        
+        # Legal variations
+        'legal': 'legal & accounting expenses',
+        'legal expenses': 'legal & accounting expenses',
+        'accounting': 'legal & accounting expenses',
+        'accounting expenses': 'legal & accounting expenses',
+        
+        # Wages variations
+        'wages': 'wages expenses',
+        'salaries': 'wages expenses',
+        'salarios': 'wages expenses',
+        'payroll': 'wages expenses',
+        'folha': 'wages expenses',
+        'folha de pagamento': 'wages expenses',
+        
+        # Web Services variations
+        'web services': 'web services expenses',
+        'cloud services': 'web services expenses',
+        'hosting': 'web services expenses',
+        
+        # Office variations
+        'office': 'office expenses',
+        'escritorio': 'office expenses',
+        
+        # Revenue variations
+        'google play': 'google play net revenue',
+        'google play revenue': 'google play net revenue',
+        'app store': 'app store net revenue',
+        'app store revenue': 'app store net revenue',
+        
+        # Investment variations
+        'rendimentos': 'rendimentos de aplicacoes',
+        'investimentos': 'rendimentos de aplicacoes',
+        'investment income': 'rendimentos de aplicacoes',
+    }
+    
+    # Check for exact match first
+    if normalized in synonyms:
+        return synonyms[normalized]
+    
+    # Check for partial matches (for more flexibility)
+    for pattern, canonical in synonyms.items():
+        if pattern in normalized and len(pattern) > 3:  # Avoid short false matches
+            return canonical
+    
+    return normalized
+
+
 # Centralized constants for payroll detection
 PAYROLL_COST_CENTER = "Wages Expenses"
 """Cost center name for all payroll-related transactions."""
@@ -319,49 +402,105 @@ def get_initial_mappings() -> List[MappingItem]:
     mappings = [
         # RECEITAS (Revenues) - CORRIGIDO: usar nomes do Conta Azul
         m("Google Play Net Revenue", "GOOGLE BRASIL PAGAMENTOS LTDA", 25, "Receita", "Receita Google Play"),
+        m("Google Play Net Revenue", "Diversos", 25, "Receita", "Google Play - Generic"),
+        
+        # Google Play (alternative naming - normalized to same canonical form)
+        m("Google Play", "Diversos", 25, "Receita", "Google Play - Generic"),
+        m("Google Play Revenue", "Diversos", 25, "Receita", "Google Play Revenue - Generic"),
+        
         m("App Store Net Revenue", "App Store (Apple)", 33, "Receita", "Receita App Store"),
+        m("App Store Net Revenue", "Diversos", 33, "Receita", "App Store - Generic"),
+        
+        # App Store (alternative naming - normalized to same canonical form)
+        m("App Store", "Diversos", 33, "Receita", "App Store - Generic"),
+        m("App Store Revenue", "Diversos", 33, "Receita", "App Store Revenue - Generic"),
+        
         m("Rendimentos de Aplicações", "CONTA SIMPLES", 38, "Receita", "Rendimentos CDI"),
         m("Rendimentos de Aplicações", "BANCO INTER", 38, "Receita", "Rendimentos Inter"),
+        m("Rendimentos de Aplicações", "Diversos", 38, "Receita", "Rendimentos - Generic"),
+        
+        # Rendimentos (alternative naming - normalized to same canonical form)
+        m("Rendimentos", "Diversos", 38, "Receita", "Rendimentos - Generic"),
+        m("Investimentos", "Diversos", 38, "Receita", "Investimentos - Generic"),
+        m("Investment Income", "Diversos", 38, "Receita", "Investment Income - Generic"),
         
         # COGS (Direct Costs)
-        # Specific
+        # Web Services Expenses
         m("Web Services Expenses", "AWS", 43, "Custo", "Amazon Web Services"),
         m("Web Services Expenses", "Cloudflare", 44, "Custo", "Cloudflare"),
         m("Web Services Expenses", "Heroku", 45, "Custo", "Heroku"),
         m("Web Services Expenses", "IAPHUB", 46, "Custo", "IAPHUB"),
         m("Web Services Expenses", "MailGun", 47, "Custo", "MailGun"),
         m("Web Services Expenses", "AWS SES", 48, "Custo", "AWS SES"),
-        # Generic
         m("Web Services Expenses", "Diversos", 43, "Custo", "Web Services - Generic"),
+        
+        # Web Services (alternative naming - normalized to same canonical form)
+        m("Web Services", "Diversos", 43, "Custo", "Web Services - Generic"),
+        m("Cloud Services", "Diversos", 43, "Custo", "Cloud Services - Generic"),
+        m("Hosting", "Diversos", 43, "Custo", "Hosting - Generic"),
 
         # SG&A (Operating Expenses)
-        # Marketing
+        # Marketing & Growth Expenses
         m("Marketing & Growth Expenses", "MGA MARKETING LTDA", 56, "Despesa", "Marketing Agency"),
+        m("Marketing & Growth Expenses", "GOOGLE ADS", 56, "Despesa", "Google Ads"),
+        m("Marketing & Growth Expenses", "FACEBOOK", 56, "Despesa", "Facebook Ads"),
         m("Marketing & Growth Expenses", "Diversos", 56, "Despesa", "Marketing - Generic"),
         
-        # Wages
+        # Marketing (alternative naming - normalized to same canonical form)
+        m("Marketing", "Diversos", 56, "Despesa", "Marketing - Generic"),
+        m("Marketing Expenses", "Diversos", 56, "Despesa", "Marketing Expenses - Generic"),
+        m("Growth Expenses", "Diversos", 56, "Despesa", "Growth Expenses - Generic"),
+        
+        # Wages Expenses
         m("Wages Expenses", "Diversos", 62, "Despesa", "Salários e Pró-labore"),
         
-        # Tech Support
+        # Wages (alternative naming - normalized to same canonical form)
+        m("Wages", "Diversos", 62, "Despesa", "Wages - Generic"),
+        m("Salaries", "Diversos", 62, "Despesa", "Salaries - Generic"),
+        m("Salários", "Diversos", 62, "Despesa", "Salários - Generic"),
+        m("Payroll", "Diversos", 62, "Despesa", "Payroll - Generic"),
+        
+        # Tech Support & Services
+        # Specific suppliers
         m("Tech Support & Services", "Adobe", 68, "Despesa", "Adobe Creative Cloud"),
         m("Tech Support & Services", "Canva", 68, "Despesa", "Canva"),
         m("Tech Support & Services", "ClickSign", 68, "Despesa", "ClickSign"),
         m("Tech Support & Services", "COMPANYHERO", 68, "Despesa", "Company Hero"),
+        m("Tech Support & Services", "ZENDESK", 65, "Despesa", "Zendesk Support"),
         m("Tech Support & Services", "Diversos", 65, "Despesa", "Tech Support - Generic"),
         
-        # Tech Support (alternative naming - both map to same line 65 intentionally)
-        m("Tech Support", "Diversos", 65, "Despesa", "Tech Support - Alternative Naming"),
+        # Tech Support (alternative naming - normalized to same canonical form)
+        m("Tech Support", "Adobe", 68, "Despesa", "Adobe - Alternative Naming"),
+        m("Tech Support", "Canva", 68, "Despesa", "Canva - Alternative Naming"),
+        m("Tech Support", "ZENDESK", 65, "Despesa", "Zendesk - Alternative Naming"),
+        m("Tech Support", "Diversos", 65, "Despesa", "Tech Support - Generic"),
+        
+        # Technical Support (another variation)
+        m("Technical Support", "Diversos", 65, "Despesa", "Technical Support - Generic"),
+        
+        # Support Services (another variation)
+        m("Support Services", "Diversos", 65, "Despesa", "Support Services - Generic"),
         
         # OTHER EXPENSES / TAXES
-        # Legal & Accounting
+        # Legal & Accounting Expenses
         m("Legal & Accounting Expenses", "BHUB.AI", 90, "Despesa", "BPO Financeiro"),
         m("Legal & Accounting Expenses", "WOLFF", 90, "Despesa", "Honorários Advocatícios"),
         m("Legal & Accounting Expenses", "Diversos", 90, "Despesa", "Legal & Accounting - Generic"),
+        
+        # Legal (alternative naming - normalized to same canonical form)
+        m("Legal", "Diversos", 90, "Despesa", "Legal - Generic"),
+        m("Legal Expenses", "Diversos", 90, "Despesa", "Legal Expenses - Generic"),
+        m("Accounting", "Diversos", 90, "Despesa", "Accounting - Generic"),
+        m("Accounting Expenses", "Diversos", 90, "Despesa", "Accounting Expenses - Generic"),
 
-        # Office
+        # Office Expenses
         m("Office Expenses", "GO OFFICES", 90, "Despesa", "Aluguel"),
         m("Office Expenses", "CO-SERVICES", 90, "Despesa", "Serviços de Escritório"),
         m("Office Expenses", "Diversos", 90, "Despesa", "Office Expenses - Generic"),
+        
+        # Office (alternative naming - normalized to same canonical form)
+        m("Office", "Diversos", 90, "Despesa", "Office - Generic"),
+        m("Escritório", "Diversos", 90, "Despesa", "Escritório - Generic"),
 
         # Travel
         m("Travel", "American Airlines", 90, "Despesa", "Viagens"),
@@ -388,7 +527,8 @@ def prepare_mappings(mappings: List[MappingItem]):
     generic_by_cc = {}
 
     for m in mappings:
-        cc = normalize_text_helper(m.centro_custo)
+        # Use enhanced normalization that handles synonyms
+        cc = normalize_cost_center(m.centro_custo)
         supp = normalize_text_helper(m.fornecedor_cliente)
 
         if supp and supp != "diversos":
@@ -447,7 +587,8 @@ def calculate_pnl(df: pd.DataFrame, mappings: List[MappingItem], overrides: Dict
     
     # Create normalized columns for robust matching (without modifying original too much)
     # We use vectorization for performance
-    filtered_df['cc_norm'] = filtered_df['Centro de Custo 1'].fillna('').apply(normalize_text_helper)
+    # Use normalize_cost_center for cost centers to handle synonyms
+    filtered_df['cc_norm'] = filtered_df['Centro de Custo 1'].fillna('').apply(normalize_cost_center)
     filtered_df['supp_norm'] = filtered_df['Nome do fornecedor/cliente'].fillna('').apply(normalize_text_helper)
     filtered_df['desc_norm'] = filtered_df['Descrição'].fillna('').apply(normalize_text_helper)
     
@@ -467,7 +608,7 @@ def calculate_pnl(df: pd.DataFrame, mappings: List[MappingItem], overrides: Dict
         matched_mapping = None
         
         # 1. Try Specific Mappings within the matching Cost Center
-        # Get candidate mappings for this Cost Center
+        # Get candidate mappings for this Cost Center (using normalized/canonical CC)
         candidates = specific_mappings.get(cc, [])
         for m in candidates:
             m_supp_norm = normalize_text_helper(m.fornecedor_cliente)
