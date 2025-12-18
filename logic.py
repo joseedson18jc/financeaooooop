@@ -24,7 +24,7 @@ Side Effects:
 
 Currency Assumptions:
     - All monetary values in Brazilian Reais (BRL/R$)
-    - Values stored as float64 with 2 decimal places precision
+    - Values stored as float64 (rounded to 2 decimal places for display)
     - Payment processing rate hardcoded at 17.65%
 """
 
@@ -657,6 +657,9 @@ def calculate_pnl(df: pd.DataFrame, mappings: List[MappingItem], overrides: Dict
         # Line 38: Investment Income (interest, CDI yields)
         # Line 49: Miscellaneous revenue (if any)
         
+        # NOTE: abs() used here enforces positive revenue display convention
+        # Refunds are mapped to Line 90 (Other Expenses) to preserve revenue as gross sales
+        # See logic_CORRECTED.py for version that preserves sign for net revenue calculation
         google_rev = abs(line_values[25].get(m, 0.0))
         apple_rev = abs(line_values[33].get(m, 0.0))
         invest_income = abs(line_values[38].get(m, 0.0)) + abs(line_values[49].get(m, 0.0))

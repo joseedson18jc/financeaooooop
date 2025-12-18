@@ -44,9 +44,9 @@ async def get_pnl_line_transactions(
     the requested line number.
     
     Args:
-        line_number: P&L line number to query (e.g., 9 for Marketing, 25 for Google Revenue).
-        month: Optional month filter in format 'YYYY-MM' or integer month number.
-        current_user: Authenticated user object (injected by FastAPI dependency).
+        line_number (int): P&L line number to query (e.g., 9 for Marketing, 25 for Google Revenue).
+        month (Optional[str]): Optional month filter in format 'YYYY-MM' (string) or integer month number.
+        current_user (dict): Authenticated user object (injected by FastAPI dependency).
     
     Returns:
         Dict containing:
