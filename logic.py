@@ -158,12 +158,17 @@ def process_upload(file_content: bytes) -> pd.DataFrame:
         available = ', '.join(df.columns[:10])  # Show first 10 columns
         raise ValueError(f"Missing required columns: {missing_cols}. Available columns: {available}...")
 
-    # Data cleaning
+    # Data cleaning and normalization
     
-    # Robust date parsing
+    # Robust date parsing - tries multiple common date formats
     def parse_dates(date_str):
+        """
+        Parse date strings in multiple formats (Brazilian DD/MM/YYYY, ISO, US).
+        Returns pd.NaT for invalid/missing dates.
+        """
         if pd.isna(date_str): return pd.NaT
         date_str = str(date_str).strip()
+        # Try formats in order: Brazilian (most common), ISO, US, dash-separated
         formats = ['%d/%m/%Y', '%Y-%m-%d', '%m/%d/%Y', '%d-%m-%Y']
         for fmt in formats:
             try:
@@ -182,18 +187,29 @@ def process_upload(file_content: bytes) -> pd.DataFrame:
         return "".join(ch for ch in s if not unicodedata.combining(ch))
     
     def converter_valor_br(valor_str: Any) -> float:
+        """
+        Convert Brazilian currency strings to float with proper sign handling.
+        
+        Handles multiple formats:
+        - Brazilian: R$ 1.234,56 (thousands separator ., decimal ,)
+        - US: 1,234.56 (thousands separator ,, decimal .)
+        - Accounting negative: (1.234,56) or 1.234,56-
+        
+        Returns 0.0 for invalid/empty values.
+        """
         if pd.isna(valor_str) or str(valor_str).strip() == "":
             return 0.0
 
+        # Remove currency symbol
         s = str(valor_str).replace('R$', '').strip()
 
         negative = False
-        # (1.234,56) accounting negative
+        # Detect accounting-style negative: (1.234,56)
         if s.startswith('(') and s.endswith(')'):
             negative = True
             s = s[1:-1].strip()
 
-        # 1.234,56- trailing minus
+        # Detect trailing minus: 1.234,56-
         if s.endswith('-'):
             negative = True
             s = s[:-1].strip()
@@ -201,13 +217,17 @@ def process_upload(file_content: bytes) -> pd.DataFrame:
         # Remove spaces
         s = s.replace(' ', '')
 
-        # Brazilian vs US separators
+        # Disambiguate thousands vs decimal separator
+        # If both ',' and '.' present, rightmost is decimal separator
         if ',' in s and '.' in s:
             if s.rfind(',') > s.rfind('.'):
+                # Brazilian format: 1.234,56 → remove . (thousands), convert , to . (decimal)
                 s = s.replace('.', '').replace(',', '.')
             else:
+                # US format: 1,234.56 → remove , (thousands), keep . (decimal)
                 s = s.replace(',', '')
         elif ',' in s:
+            # Only comma: assume decimal separator (Brazilian)
             s = s.replace(',', '.')
 
         try:
@@ -218,28 +238,34 @@ def process_upload(file_content: bytes) -> pd.DataFrame:
 
     df['Valor_Num'] = df['Valor (R$)'].apply(converter_valor_br)
 
+    # Apply transaction type (Entrada/Saída) to determine sign
     if 'Tipo' in df.columns:
         tipo = df['Tipo'].apply(normalize_text)
 
+        # Identify expenses/debits (should be negative)
+        # "Saída" = outflow, "Débito" = debit, "Despesa" = expense, "Pagamento" = payment
         is_saida = (
             tipo.str.contains('saida') |
             tipo.str.contains('debito') |
             tipo.str.contains('despesa') |
             tipo.str.contains('pagamento')
         )
-        # Entrada/Credito/Receita -> positive
+        # Entrada/Credito/Receita → positive sign (+1.0)
+        # Saída/Débito/Despesa/Pagamento → negative sign (-1.0)
         sign = np.where(is_saida, -1.0, 1.0)
 
-        # IMPORTANT: ignore any embedded minus in the numeric string,
-        # because Tipo is the source of truth.
+        # CRITICAL: Use Tipo column as source of truth for sign
+        # Override any embedded minus from converter_valor_br
+        # Take absolute value then apply correct sign based on Tipo
         df['Valor_Num'] = df['Valor_Num'].abs() * sign
         
-        # Validation Log
+        # Validation logging for debugging
         logger.info("Tipo normalization applied.")
         logger.info(f"Tipo counts: {tipo.value_counts().to_dict()}")
         logger.info(f"Sum Valor_Num (signed): {df['Valor_Num'].sum():.2f}")
         logger.info(f"Sum abs Valor_Num: {df['Valor_Num'].abs().sum():.2f}")
     else:
+        # Fallback: if no Tipo column, rely on sign from converter_valor_br
         logger.warning("CSV has no Tipo/Entrada-Saída column; using sign embedded in Valor (R$).")
     df['Mes_Competencia'] = df['Data de competência'].dt.to_period('M')
     
@@ -252,6 +278,7 @@ def process_upload(file_content: bytes) -> pd.DataFrame:
         df['Categoria 1'] = df['Categoria 1'].astype(str).str.strip()
 
     # Ensure payroll transactions are routed to Wages Expenses (P&L line 62)
+    # This enforces consistent categorization even if cost center is wrong in Conta Azul
     payroll_keywords = [
         'folha de pagamento', 'folha pagamento', 'folha',
         'pro labore', 'pro-labore', 'pró labore', 'pró-labore',
@@ -260,23 +287,31 @@ def process_upload(file_content: bytes) -> pd.DataFrame:
     ]
 
     def enforce_wages_cost_center(row):
+        """
+        Detect and reroute payroll transactions to 'Wages Expenses' cost center.
+        
+        Searches for payroll keywords in Categoria, Descrição, and Fornecedor fields.
+        Overrides Centro de Custo if payroll indicators found.
+        """
         current_cc = str(row.get('Centro de Custo 1', '') or '').strip()
         cc_norm = normalize_text_helper(current_cc)
 
-        # Already correctly tagged
+        # Already correctly tagged - no change needed
         if cc_norm == 'wages expenses':
             return 'Wages Expenses'
 
-        # Build a combined text field to search for payroll hints
+        # Build combined search text from multiple fields
         combined_text = ' '.join([
             normalize_text_helper(row.get('Categoria 1', '')),
             normalize_text_helper(row.get('Descrição', '')),
             normalize_text_helper(row.get('Nome do fornecedor/cliente', ''))
         ])
 
+        # Check if any payroll keyword appears in combined text
         if any(keyword in combined_text for keyword in payroll_keywords):
             return 'Wages Expenses'
 
+        # No payroll indicators - keep original cost center
         return current_cc
 
     df['Centro de Custo 1'] = df.apply(enforce_wages_cost_center, axis=1)
@@ -523,24 +558,25 @@ def calculate_pnl(df: pd.DataFrame, mappings: List[MappingItem], overrides: Dict
     # line_values[line_num][month_str] = value
     line_values = {i: {m: 0.0 for m in month_strs} for i in range(1, 121)}
 
-    # Optimize Mapping Lookups
+    # Optimize Mapping Lookups - O(1) by cost center instead of O(n) linear search
     specific_mappings, generic_mappings = prepare_mappings(mappings)
 
     # DataFrame Enhancement for Matching
-    # Ensure necessary columns exist for detailed matching
+    # Pre-compute normalized columns for performance (vectorized operations)
     if 'Descrição' not in filtered_df.columns:
         filtered_df['Descrição'] = ''
     
-    # Create normalized columns for robust matching (without modifying original too much)
-    # We use vectorization for performance
+    # Normalize all text fields used in matching (case-insensitive, no accents)
     filtered_df['cc_norm'] = filtered_df['Centro de Custo 1'].fillna('').apply(normalize_text_helper)
     filtered_df['supp_norm'] = filtered_df['Nome do fornecedor/cliente'].fillna('').apply(normalize_text_helper)
     filtered_df['desc_norm'] = filtered_df['Descrição'].fillna('').apply(normalize_text_helper)
     
-    # Combined text for looser matching (Supplier + Description)
+    # Combined search text: supplier + description for substring matching
+    # Enables matching supplier name mentioned in description field
     filtered_df['match_text'] = (filtered_df['supp_norm'] + " " + filtered_df['desc_norm']).str.strip()
 
-    # Iterate through DataFrame
+    # Iterate through transactions and match to P&L lines
+    # Uses hierarchical matching strategy: Specific → Generic → Categoria fallback
     for _, row in filtered_df.iterrows():
         month = str(row['Mes_Competencia'])
         if month not in month_strs:
@@ -552,127 +588,160 @@ def calculate_pnl(df: pd.DataFrame, mappings: List[MappingItem], overrides: Dict
         
         matched_mapping = None
         
-        # 1. Try Specific Mappings within the matching Cost Center
-        # Get candidate mappings for this Cost Center
+        # === Hierarchical Matching Strategy ===
+        
+        # Level 1: Specific Mappings (Cost Center + Supplier substring match)
+        # Try to match specific supplier within the cost center
+        # Sorted by length (longest first) to match most specific pattern
         candidates = specific_mappings.get(cc, [])
         for m in candidates:
             m_supp_norm = normalize_text_helper(m.fornecedor_cliente)
-            # Check if filtered supplier token exists in the row's supplier OR description
+            # Substring match: check if supplier name appears in combined text
+            # Example: "aws" in "aws ireland" OR "paid to aws"
             if m_supp_norm in match_text:
                 matched_mapping = m
                 break
         
-        # 2. If no specific match, try Generic Mapping for this Cost Center
+        # Level 2: Generic Mapping (Cost Center + "Diversos")
+        # Fallback if no specific supplier matched
         if not matched_mapping:
             matched_mapping = generic_mappings.get(cc)
         
-        # 3. Fallback: If still no match, try 'Categoria 1' as Cost Center (if available)
+        # Level 3: Categoria 1 Fallback
+        # If cost center didn't match, try Categoria 1 as alternative grouping
         if not matched_mapping and 'Categoria 1' in row:
             cat_cc = normalize_text_helper(row['Categoria 1'])
-            # Try specific
+            # Try specific mappings for categoria
             candidates_cat = specific_mappings.get(cat_cc, [])
             for m in candidates_cat:
                 m_supp_norm = normalize_text_helper(m.fornecedor_cliente)
                 if m_supp_norm in match_text:
                     matched_mapping = m
                     break
-            # Try generic
+            # Try generic mapping for categoria
             if not matched_mapping:
                 matched_mapping = generic_mappings.get(cat_cc)
 
-        # 4. If match found, accumulate
+        # Accumulate value to matched P&L line
         if matched_mapping:
             try:
                 line_num = int(matched_mapping.linha_pl)
                 line_values[line_num][month] += val
                 
-                # DEBUG: Log large matches
+                # DEBUG: Log large transactions for audit trail
                 if abs(val) > 20000:
                     description = matched_mapping.observacoes
                     logger.info(f"MATCH: Line {line_num} ({description}) | Val: {val:.2f} | Basis: '{match_text}' matched '{matched_mapping.fornecedor_cliente}'")
             except:
+                # Silently skip invalid line numbers
                 continue
         else:
-            # Optionally log unmapped significant items
+            # Log unmapped significant transactions for review
+            # These transactions won't appear in P&L
             if abs(val) > 10000:
                 logger.debug(f"UNMAPPED: {val:.2f} | CC: {cc} | Text: {match_text}")
 
     # ========================================================================
-    # CALCULATE DERIVED VALUES FOR EACH MONTH
+    # CALCULATE DERIVED FINANCIAL METRICS FOR EACH MONTH
     # ========================================================================
+    # Aggregates raw line values into standard P&L structure following
+    # accounting conventions: Revenue - COGS = Gross Profit - OpEx = EBITDA
     
     for m in month_strs:
         
         # ============================================
-        # FINANCIAL CALCULATIONS
+        # STEP 1: REVENUE AGGREGATION
         # ============================================
+        # Line 25: Google Play Revenue (from Conta Azul)
+        # Line 33: App Store Revenue (from Conta Azul)
+        # Line 38: Investment Income (interest, CDI yields)
+        # Line 49: Miscellaneous revenue (if any)
         
-        # 1. TOTAL REVENUE (Enforced positive)
         google_rev = abs(line_values[25].get(m, 0.0))
         apple_rev = abs(line_values[33].get(m, 0.0))
-        # Line 38 (Rendimentos) + Line 49 (Possible misc revenue)
         invest_income = abs(line_values[38].get(m, 0.0)) + abs(line_values[49].get(m, 0.0))
         
         total_revenue = google_rev + apple_rev + invest_income
-        revenue_no_tax = google_rev + apple_rev
+        revenue_no_tax = google_rev + apple_rev  # Excludes investment income for fee calculation
         
-        # 2. PAYMENT PROCESSING (17.65%)
-        # Note: If user wants specific line items for negative adjustments (refunds),
-        # they should be mapped to an Expense line or kept in Revenue to reduce it.
-        # Current logic ABSOLUTES the revenue, so refunds (-100) become (+100).
-        # To fix this without breaking the "No Negative Revenue" rule for the Total:
-        # We should logically SUM the raw values first.
-        # But 'process_upload' already applies sign based on Tipo.
-        # If 'Devoluções' (Refunds) has Tipo='Saída', value is Negative.
-        # If we map 'Devoluções' to Line 25 (Google Revenue), it would REDUCE the sum.
-        # BUT, we are taking abs() below: `google_rev = abs(...)`.
-        # This INVALIDATES refunds if they are mapped to Revenue lines.
-        #
-        # FIX: We mapped 'Devoluções e Estornos' to Line 90 (Other Expenses) in get_initial_mappings.
-        # So Refunds are treated as Expenses. This preserves Revenue as purely Gross Sales
-        # and Refunds as an Expense line. This is safer and aligned with "No Negative Revenue".
+        # ============================================
+        # STEP 2: PAYMENT PROCESSING FEES
+        # ============================================
+        # Google and Apple charge 17.65% combined fees
+        # (15% platform fee + additional processing fees)
+        # Investment income doesn't incur these fees
         
-        payment_processing_rate = 0.1765
+        payment_processing_rate = 0.1765  # 17.65% hardcoded rate
         payment_processing_cost = revenue_no_tax * payment_processing_rate
         
-        # 3. COGS
+        # ============================================
+        # STEP 3: COST OF GOODS SOLD (COGS)
+        # ============================================
+        # Lines 43-48: Web Services (AWS, Cloudflare, Heroku, IAPHUB, MailGun, AWS SES)
+        # Direct costs attributable to delivering the service
+        
         cogs_sum = sum(abs(line_values[i].get(m, 0.0)) for i in range(43, 49))
         
-        # 4. GROSS PROFIT
+        # ============================================
+        # STEP 4: GROSS PROFIT
+        # ============================================
+        # Revenue minus all direct costs (payment processing + COGS)
+        
         gross_profit = total_revenue - payment_processing_cost - cogs_sum
         
-        # 5. OPEX
+        # ============================================
+        # STEP 5: OPERATING EXPENSES (OpEx)
+        # ============================================
+        # Line 56: Marketing & Growth
+        # Line 62: Wages (salaries, pro-labore, payroll)
+        # Lines 65, 68: Tech Support & Services (Adobe, Canva, etc.)
+        # Line 90: Other Expenses (legal, accounting, office, taxes, refunds)
+        
         marketing_abs = abs(line_values[56].get(m, 0.0))
         wages_abs = abs(line_values[62].get(m, 0.0))
-        # Tech Support: 68 + 65
         tech_support_abs = abs(line_values[68].get(m, 0.0)) + abs(line_values[65].get(m, 0.0))
         other_expenses_abs = abs(line_values[90].get(m, 0.0))
         
+        # SG&A: Selling, General & Administrative expenses
         sga_total = marketing_abs + wages_abs + tech_support_abs
         total_opex = sga_total + other_expenses_abs
         
-        # 6. EBITDA
+        # ============================================
+        # STEP 6: EBITDA (Operating Profit)
+        # ============================================
+        # Earnings Before Interest, Taxes, Depreciation, Amortization
+        # Simplified: no D&A or interest in this model
+        
         ebitda = gross_profit - total_opex
         
-        # 7. NET RESULT
+        # ============================================
+        # STEP 7: NET RESULT
+        # ============================================
+        # Simplified: EBITDA = Net Result (no taxes, D&A, or interest modeled)
+        
         net_result = ebitda
         
-        # Store for Display (Revenues +, Expenses -)
-        line_values[100][m] = total_revenue
-        line_values[101][m] = revenue_no_tax
-        line_values[112][m] = google_rev
-        line_values[113][m] = apple_rev
-        line_values[102][m] = -payment_processing_cost
-        line_values[103][m] = -cogs_sum
-        line_values[104][m] = gross_profit
-        line_values[105][m] = -sga_total
-        line_values[106][m] = ebitda
-        line_values[107][m] = -marketing_abs
-        line_values[108][m] = -wages_abs
-        line_values[109][m] = -tech_support_abs
-        line_values[110][m] = -other_expenses_abs
-        line_values[111][m] = net_result
+        # ============================================
+        # STORE CALCULATED VALUES FOR DISPLAY
+        # ============================================
+        # Convention: Revenue positive, Expenses negative
         
+        line_values[100][m] = total_revenue           # Total Revenue
+        line_values[101][m] = revenue_no_tax          # Revenue (no investment income)
+        line_values[112][m] = google_rev              # Google Play breakdown
+        line_values[113][m] = apple_rev               # App Store breakdown
+        line_values[102][m] = -payment_processing_cost  # Payment fees (negative)
+        line_values[103][m] = -cogs_sum               # COGS (negative)
+        line_values[104][m] = gross_profit            # Gross Profit (positive)
+        line_values[105][m] = -sga_total              # SG&A (negative)
+        line_values[106][m] = ebitda                  # EBITDA (can be negative)
+        line_values[107][m] = -marketing_abs          # Marketing detail (negative)
+        line_values[108][m] = -wages_abs              # Wages detail (negative)
+        line_values[109][m] = -tech_support_abs       # Tech support detail (negative)
+        line_values[110][m] = -other_expenses_abs     # Other expenses detail (negative)
+        line_values[111][m] = net_result              # Net Result
+        
+        # Log monthly summary for audit/debugging
         logger.info(f"Month {m}: Rev={total_revenue:.2f}, EBITDA={ebitda:.2f}")
 
     # APPLY OVERRIDES (Restricted to Final Lines)
