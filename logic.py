@@ -118,8 +118,8 @@ def process_upload(file_content: bytes) -> pd.DataFrame:
     for encoding in encodings:
         for sep in separators:
             try:
-                # Try strict parsing first
-                df = pd.read_csv(io.BytesIO(file_content), encoding=encoding, sep=sep)
+                # Try strict parsing first with low_memory=False for large files (15k+ lines)
+                df = pd.read_csv(io.BytesIO(file_content), encoding=encoding, sep=sep, low_memory=False)
                 
                 # Check if it has the critical column 'Data de competência'
                 if 'Data de competência' in df.columns:
@@ -136,7 +136,7 @@ def process_upload(file_content: bytes) -> pd.DataFrame:
         for sep in separators:
             try:
                 print(f"⚠️ Strict parsing failed. Retrying with on_bad_lines='skip', encoding={encoding}, sep='{sep}'")
-                df = pd.read_csv(io.BytesIO(file_content), encoding=encoding, sep=sep, on_bad_lines='skip', engine='python')
+                df = pd.read_csv(io.BytesIO(file_content), encoding=encoding, sep=sep, on_bad_lines='skip', engine='python', low_memory=False)
                 if 'Data de competência' in df.columns:
                     break
                 else:
@@ -261,11 +261,12 @@ def process_upload(file_content: bytes) -> pd.DataFrame:
         # because Tipo is the source of truth.
         df['Valor_Num'] = df['Valor_Num'].abs() * sign
         
-        # Validation Log
-        logger.info("Tipo normalization applied.")
-        logger.info(f"Tipo counts: {tipo.value_counts().to_dict()}")
-        logger.info(f"Sum Valor_Num (signed): {df['Valor_Num'].sum():.2f}")
-        logger.info(f"Sum abs Valor_Num: {df['Valor_Num'].abs().sum():.2f}")
+        # Validation Log (reduced for performance with large datasets)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Tipo normalization applied.")
+            logger.debug(f"Tipo counts: {tipo.value_counts().to_dict()}")
+            logger.debug(f"Sum Valor_Num (signed): {df['Valor_Num'].sum():.2f}")
+            logger.debug(f"Sum abs Valor_Num: {df['Valor_Num'].abs().sum():.2f}")
     else:
         logger.warning("CSV has no Tipo/Entrada-Saída column; using sign embedded in Valor (R$).")
     df['Mes_Competencia'] = df['Data de competência'].dt.to_period('M')
@@ -279,29 +280,22 @@ def process_upload(file_content: bytes) -> pd.DataFrame:
         df['Categoria 1'] = df['Categoria 1'].astype(str).str.strip()
 
     # Ensure payroll transactions are routed to Wages Expenses (P&L line 62)
-
-    def enforce_wages_cost_center(row):
-        current_cc = str(row.get('Centro de Custo 1', '') or '').strip()
-        cc_norm = normalize_text_helper(current_cc)
-
-        # Already correctly tagged
-        if cc_norm == normalize_text_helper(PAYROLL_COST_CENTER):
-            return PAYROLL_COST_CENTER
-
-        # Build a combined text field to search for payroll hints
-        combined_text = ' '.join([
-            cc_norm,
-            normalize_text_helper(row.get('Categoria 1', '')),
-            normalize_text_helper(row.get('Descrição', '')),
-            normalize_text_helper(row.get('Nome do fornecedor/cliente', ''))
-        ])
-
-        if any(keyword in combined_text for keyword in PAYROLL_KEYWORDS):
-            return PAYROLL_COST_CENTER
-
-        return current_cc
-
-    df['Centro de Custo 1'] = df.apply(enforce_wages_cost_center, axis=1)
+    # Vectorized approach for better performance with large datasets (15k+ rows)
+    
+    # Create normalized columns for payroll detection
+    cc_norm = df['Centro de Custo 1'].fillna('').astype(str).apply(normalize_text_helper)
+    cat_norm = df['Categoria 1'].fillna('').astype(str).apply(normalize_text_helper) if 'Categoria 1' in df.columns else pd.Series([''] * len(df))
+    desc_norm = df['Descrição'].fillna('').astype(str).apply(normalize_text_helper) if 'Descrição' in df.columns else pd.Series([''] * len(df))
+    supp_norm = df['Nome do fornecedor/cliente'].fillna('').astype(str).apply(normalize_text_helper)
+    
+    # Combine all text fields
+    combined_text = cc_norm + ' ' + cat_norm + ' ' + desc_norm + ' ' + supp_norm
+    
+    # Check if any payroll keyword is present
+    payroll_mask = combined_text.apply(lambda text: any(keyword in text for keyword in PAYROLL_KEYWORDS))
+    
+    # Apply the wages cost center where payroll keywords are found
+    df.loc[payroll_mask, 'Centro de Custo 1'] = PAYROLL_COST_CENTER
 
     return df
 
@@ -427,11 +421,18 @@ def calculate_pnl(df: pd.DataFrame, mappings: List[MappingItem], overrides: Dict
 
     # Calculate months from filtered data
     months = sorted(filtered_df['Mes_Competencia'].dropna().unique())
+    
+    # Limit to last 120 months (10 years) for performance and practical display limits
+    # This prevents memory issues with very long historical data
+    if len(months) > 120:
+        months = months[-120:]
+    
     month_strs = [str(m) for m in months]
 
-    # Initialize data structure for calculations
-    # line_values[line_num][month_str] = value
-    line_values = {i: {m: 0.0 for m in month_strs} for i in range(1, 121)}
+    # Initialize data structure for calculations with defaultdict for dynamic P&L lines
+    # This allows supporting 20,000+ P&L lines without pre-allocating memory
+    from collections import defaultdict
+    line_values = defaultdict(lambda: {m: 0.0 for m in month_strs})
 
     # Optimize Mapping Lookups
     specific_mappings, generic_mappings = prepare_mappings(mappings)
@@ -496,10 +497,10 @@ def calculate_pnl(df: pd.DataFrame, mappings: List[MappingItem], overrides: Dict
                 line_num = int(matched_mapping.linha_pl)
                 line_values[line_num][month] += val
                 
-                # DEBUG: Log large matches
-                if abs(val) > 20000:
+                # DEBUG: Log large matches (only in debug mode for performance)
+                if logger.isEnabledFor(logging.DEBUG) and abs(val) > 20000:
                     description = matched_mapping.observacoes
-                    logger.info(f"MATCH: Line {line_num} ({description}) | Val: {val:.2f} | Basis: '{match_text}' matched '{matched_mapping.fornecedor_cliente}'")
+                    logger.debug(f"MATCH: Line {line_num} ({description}) | Val: {val:.2f} | Basis: '{match_text}' matched '{matched_mapping.fornecedor_cliente}'")
             except:
                 continue
         else:
