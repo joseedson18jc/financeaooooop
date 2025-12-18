@@ -1,51 +1,41 @@
 """
-Corrected Financial Data Processing Module.
+Financial Data Processing and P&L Calculation Module.
 
-This is an improved version of logic.py with bug fixes and optimizations.
-Contains the same functionality as logic.py but with critical corrections:
+This module provides core business logic for processing financial transactions from
+Conta Azul (Brazilian accounting system) and generating Profit & Loss (P&L) statements,
+dashboards, and financial forecasts.
 
-Key Improvements:
-    1. Fixed cost center mappings to match Conta Azul export names exactly
-    2. Removed abs() calls that incorrectly converted negative revenue to positive
-    3. Properly handles refunds and chargebacks with correct sign
-    4. Optimized payroll detection with centralized constants
-    
-Changes from Original logic.py:
-    - PAYROLL_COST_CENTER: Centralized constant for payroll routing
-    - PAYROLL_KEYWORDS: Pre-normalized list of payroll-related keywords
-    - process_upload(): Same implementation with enhanced comments
-    - All calculation functions: Corrected financial logic
-    
-Test Results:
-    - 6/6 tests passing (100% success rate)
-    - Handles precision rounding correctly
-    - Supports large numbers (billions scale)
-    - Zero division safety for margins
-    - Negative revenue scenarios (refunds)
-    
-Usage:
-    This module can be used as a drop-in replacement for logic.py.
-    Import functions the same way:
-        from logic_CORRECTED import process_upload, calculate_pnl, etc.
-        
+Main Components:
+    - CSV data parsing and normalization (multiple encodings, formats)
+    - Transaction categorization and mapping to P&L lines
+    - Financial calculations (revenue, costs, EBITDA, margins)
+    - Dashboard KPI generation
+    - Linear regression-based financial forecasting
+
 Dependencies:
-    - Same as logic.py (pandas, numpy, sklearn, models)
-    
+    - pandas: Data manipulation and analysis
+    - numpy: Numerical computations
+    - sklearn: Machine learning for forecasting
+    - models: Data models (MappingItem, PnLItem, PnLResponse, DashboardData)
+
 Side Effects:
-    - Same as logic.py (logging of calculations)
-    
-Notes:
-    - This file serves as reference implementation for bug fixes
-    - Eventually should replace logic.py after thorough testing
-    - See diff_detalhado.py for detailed change analysis
+    - Logging of financial calculations and warnings
+    - No direct file I/O (data passed as bytes/DataFrames)
+
+Currency Assumptions:
+    - All monetary values in Brazilian Reais (BRL/R$)
+    - Values stored as float64 (rounded to 2 decimal places for display)
+    - Payment processing rate hardcoded at 17.65%
 """
 
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import LinearRegression
+from datetime import datetime
 import io
 import logging
 from typing import List, Dict, Any
+from collections import defaultdict
 import unicodedata
 from models import MappingItem, PnLItem, PnLResponse, DashboardData
 
@@ -53,144 +43,37 @@ from models import MappingItem, PnLItem, PnLResponse, DashboardData
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-
-def normalize_text_helper(s: Any) -> str:
-    """
-    Normalize text for consistent case-insensitive matching.
-    
-    Converts to lowercase, strips whitespace, and removes diacritical marks
-    (accents) to enable robust fuzzy matching of cost centers and supplier names.
-    
-    Args:
-        s: Input string or value to normalize (can be NaN, None, or any type).
-        
-    Returns:
-        Normalized lowercase string without accents, or empty string for NaN/None.
-        
-    Examples:
-        >>> normalize_text_helper("São Paulo  ")
-        'sao paulo'
-        >>> normalize_text_helper("TÉCNICO")
-        'tecnico'
-        >>> normalize_text_helper(None)
-        ''
-    """
-    if pd.isna(s):
-        return ""
-    s = str(s).strip().lower()
-    s = unicodedata.normalize("NFKD", s)
-    return "".join(ch for ch in s if not unicodedata.combining(ch))
-
-
-def normalize_cost_center(cc: str) -> str:
-    """
-    Normalize cost center name to canonical form, handling synonyms and variations.
-    
-    This function maps various cost center naming patterns to their canonical forms,
-    ensuring consistent matching regardless of minor variations in naming conventions.
-    
-    Args:
-        cc: Cost center name to normalize
-        
-    Returns:
-        Canonical normalized cost center name
-        
-    Examples:
-        >>> normalize_cost_center("Tech Support")
-        'tech support & services'
-        >>> normalize_cost_center("Tech Support & Services")
-        'tech support & services'
-        >>> normalize_cost_center("Marketing")
-        'marketing & growth expenses'
-    """
-    normalized = normalize_text_helper(cc)
-    
-    # Cost center synonym mappings - map variations to canonical forms
-    synonyms = {
-        # Tech Support variations
-        'tech support': 'tech support & services',
-        'technical support': 'tech support & services',
-        'tech services': 'tech support & services',
-        'support': 'tech support & services',
-        
-        # Marketing variations
-        'marketing': 'marketing & growth expenses',
-        'marketing expenses': 'marketing & growth expenses',
-        'growth expenses': 'marketing & growth expenses',
-        
-        # Legal variations
-        'legal': 'legal & accounting expenses',
-        'legal expenses': 'legal & accounting expenses',
-        'accounting': 'legal & accounting expenses',
-        'accounting expenses': 'legal & accounting expenses',
-        
-        # Wages variations
-        'wages': 'wages expenses',
-        'salaries': 'wages expenses',
-        'salarios': 'wages expenses',
-        'payroll': 'wages expenses',
-        'folha': 'wages expenses',
-        'folha de pagamento': 'wages expenses',
-        
-        # Web Services variations
-        'web services': 'web services expenses',
-        'cloud services': 'web services expenses',
-        'hosting': 'web services expenses',
-        
-        # Office variations
-        'office': 'office expenses',
-        'escritorio': 'office expenses',
-        
-        # Revenue variations
-        'google play': 'google play net revenue',
-        'google play revenue': 'google play net revenue',
-        'app store': 'app store net revenue',
-        'app store revenue': 'app store net revenue',
-        
-        # Investment variations
-        'rendimentos': 'rendimentos de aplicacoes',
-        'investimentos': 'rendimentos de aplicacoes',
-        'investment income': 'rendimentos de aplicacoes',
-    }
-    
-    # Check for exact match first
-    if normalized in synonyms:
-        return synonyms[normalized]
-    
-    # Check for partial matches (for more flexibility)
-    for pattern, canonical in synonyms.items():
-        if pattern in normalized and len(pattern) > 3:  # Avoid short false matches
-            return canonical
-    
-    return normalized
-
-
-# Centralized constants for payroll detection
-PAYROLL_COST_CENTER = "Wages Expenses"
-"""Cost center name for all payroll-related transactions."""
-
-PAYROLL_KEYWORDS = [
-    normalize_text_helper(k)
-    for k in [
-        "folha de pagamento",
-        "folha pagamento",
-        "folha",
-        "pro labore",
-        "pro-labore",
-        "pró labore",
-        "pró-labore",
-        "salario",
-        "salário",
-        "holerite",
-        "prestador de servico pj",
-        "payroll",
-    ]
-]
-"""Pre-normalized list of keywords that indicate payroll transactions."""
-
 def process_upload(file_content: bytes) -> pd.DataFrame:
     """
-    Process the uploaded CSV file from Conta Azul.
+    Process and normalize uploaded CSV file from Conta Azul accounting system.
+    
+    Handles multiple CSV formats, encodings, and separator types commonly exported
+    by Conta Azul. Performs data cleaning, normalization, and validation to ensure
+    consistent processing downstream.
+    
+    Args:
+        file_content: Raw CSV file content as bytes.
+        
+    Returns:
+        Processed DataFrame with normalized columns and computed fields:
+            - Data de competência: Parsed datetime
+            - Valor_Num: Numeric value with correct sign (+ for revenue, - for expense)
+            - Mes_Competencia: Month period for aggregation
+            - Centro de Custo 1: Normalized cost center
+            - Nome do fornecedor/cliente: Normalized supplier/client name
+            
+    Raises:
+        ValueError: If file cannot be parsed or missing required columns.
+        
+    Side Effects:
+        - Prints parsing attempts and column mappings to stdout
+        - Logs tipo normalization statistics
+        
+    Notes:
+        - Tries multiple encoding/separator combinations automatically
+        - Handles Brazilian number format (1.234,56)
+        - Enforces payroll transactions to 'Wages Expenses' cost center
+        - Preserves sign based on 'Tipo' column (Entrada/Saída)
     """
     # Try different encodings and separators
     df = None
@@ -201,8 +84,8 @@ def process_upload(file_content: bytes) -> pd.DataFrame:
     for encoding in encodings:
         for sep in separators:
             try:
-                # Try strict parsing first with low_memory=False for large files (15k+ lines)
-                df = pd.read_csv(io.BytesIO(file_content), encoding=encoding, sep=sep, low_memory=False)
+                # Try strict parsing first
+                df = pd.read_csv(io.BytesIO(file_content), encoding=encoding, sep=sep)
                 
                 # Check if it has the critical column 'Data de competência'
                 if 'Data de competência' in df.columns:
@@ -219,7 +102,7 @@ def process_upload(file_content: bytes) -> pd.DataFrame:
         for sep in separators:
             try:
                 print(f"⚠️ Strict parsing failed. Retrying with on_bad_lines='skip', encoding={encoding}, sep='{sep}'")
-                df = pd.read_csv(io.BytesIO(file_content), encoding=encoding, sep=sep, on_bad_lines='skip', engine='python', low_memory=False)
+                df = pd.read_csv(io.BytesIO(file_content), encoding=encoding, sep=sep, on_bad_lines='skip', engine='python')
                 if 'Data de competência' in df.columns:
                     break
                 else:
@@ -275,12 +158,17 @@ def process_upload(file_content: bytes) -> pd.DataFrame:
         available = ', '.join(df.columns[:10])  # Show first 10 columns
         raise ValueError(f"Missing required columns: {missing_cols}. Available columns: {available}...")
 
-    # Data cleaning
+    # Data cleaning and normalization
     
-    # Robust date parsing
+    # Robust date parsing - tries multiple common date formats
     def parse_dates(date_str):
+        """
+        Parse date strings in multiple formats (Brazilian DD/MM/YYYY, ISO, US).
+        Returns pd.NaT for invalid/missing dates.
+        """
         if pd.isna(date_str): return pd.NaT
         date_str = str(date_str).strip()
+        # Try formats in order: Brazilian (most common), ISO, US, dash-separated
         formats = ['%d/%m/%Y', '%Y-%m-%d', '%m/%d/%Y', '%d-%m-%Y']
         for fmt in formats:
             try:
@@ -291,19 +179,37 @@ def process_upload(file_content: bytes) -> pd.DataFrame:
 
     df['Data de competência'] = df['Data de competência'].apply(parse_dates)
     
+    def normalize_text(s: Any) -> str:
+        if pd.isna(s):
+            return ""
+        s = str(s).strip().lower()
+        s = unicodedata.normalize("NFKD", s)
+        return "".join(ch for ch in s if not unicodedata.combining(ch))
+    
     def converter_valor_br(valor_str: Any) -> float:
+        """
+        Convert Brazilian currency strings to float with proper sign handling.
+        
+        Handles multiple formats:
+        - Brazilian: R$ 1.234,56 (thousands separator ., decimal ,)
+        - US: 1,234.56 (thousands separator ,, decimal .)
+        - Accounting negative: (1.234,56) or 1.234,56-
+        
+        Returns 0.0 for invalid/empty values.
+        """
         if pd.isna(valor_str) or str(valor_str).strip() == "":
             return 0.0
 
+        # Remove currency symbol
         s = str(valor_str).replace('R$', '').strip()
 
         negative = False
-        # (1.234,56) accounting negative
+        # Detect accounting-style negative: (1.234,56)
         if s.startswith('(') and s.endswith(')'):
             negative = True
             s = s[1:-1].strip()
 
-        # 1.234,56- trailing minus
+        # Detect trailing minus: 1.234,56-
         if s.endswith('-'):
             negative = True
             s = s[:-1].strip()
@@ -311,13 +217,17 @@ def process_upload(file_content: bytes) -> pd.DataFrame:
         # Remove spaces
         s = s.replace(' ', '')
 
-        # Brazilian vs US separators
+        # Disambiguate thousands vs decimal separator
+        # If both ',' and '.' present, rightmost is decimal separator
         if ',' in s and '.' in s:
             if s.rfind(',') > s.rfind('.'):
+                # Brazilian format: 1.234,56 → remove . (thousands), convert , to . (decimal)
                 s = s.replace('.', '').replace(',', '.')
             else:
+                # US format: 1,234.56 → remove , (thousands), keep . (decimal)
                 s = s.replace(',', '')
         elif ',' in s:
+            # Only comma: assume decimal separator (Brazilian)
             s = s.replace(',', '.')
 
         try:
@@ -328,29 +238,34 @@ def process_upload(file_content: bytes) -> pd.DataFrame:
 
     df['Valor_Num'] = df['Valor (R$)'].apply(converter_valor_br)
 
+    # Apply transaction type (Entrada/Saída) to determine sign
     if 'Tipo' in df.columns:
-        tipo = df['Tipo'].apply(normalize_text_helper)
+        tipo = df['Tipo'].apply(normalize_text)
 
+        # Identify expenses/debits (should be negative)
+        # "Saída" = outflow, "Débito" = debit, "Despesa" = expense, "Pagamento" = payment
         is_saida = (
             tipo.str.contains('saida') |
             tipo.str.contains('debito') |
             tipo.str.contains('despesa') |
             tipo.str.contains('pagamento')
         )
-        # Entrada/Credito/Receita -> positive
+        # Entrada/Credito/Receita → positive sign (+1.0)
+        # Saída/Débito/Despesa/Pagamento → negative sign (-1.0)
         sign = np.where(is_saida, -1.0, 1.0)
 
-        # IMPORTANT: ignore any embedded minus in the numeric string,
-        # because Tipo is the source of truth.
+        # CRITICAL: Use Tipo column as source of truth for sign
+        # Override any embedded minus from converter_valor_br
+        # Take absolute value then apply correct sign based on Tipo
         df['Valor_Num'] = df['Valor_Num'].abs() * sign
         
-        # Validation Log (reduced for performance with large datasets)
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Tipo normalization applied.")
-            logger.debug(f"Tipo counts: {tipo.value_counts().to_dict()}")
-            logger.debug(f"Sum Valor_Num (signed): {df['Valor_Num'].sum():.2f}")
-            logger.debug(f"Sum abs Valor_Num: {df['Valor_Num'].abs().sum():.2f}")
+        # Validation logging for debugging
+        logger.info("Tipo normalization applied.")
+        logger.info(f"Tipo counts: {tipo.value_counts().to_dict()}")
+        logger.info(f"Sum Valor_Num (signed): {df['Valor_Num'].sum():.2f}")
+        logger.info(f"Sum abs Valor_Num: {df['Valor_Num'].abs().sum():.2f}")
     else:
+        # Fallback: if no Tipo column, rely on sign from converter_valor_br
         logger.warning("CSV has no Tipo/Entrada-Saída column; using sign embedded in Valor (R$).")
     df['Mes_Competencia'] = df['Data de competência'].dt.to_period('M')
     
@@ -363,29 +278,74 @@ def process_upload(file_content: bytes) -> pd.DataFrame:
         df['Categoria 1'] = df['Categoria 1'].astype(str).str.strip()
 
     # Ensure payroll transactions are routed to Wages Expenses (P&L line 62)
-    # Vectorized approach for better performance with large datasets (15k+ rows)
-    
-    # Create normalized columns for payroll detection
-    cc_norm = df['Centro de Custo 1'].fillna('').astype(str).apply(normalize_text_helper)
-    cat_norm = df['Categoria 1'].fillna('').astype(str).apply(normalize_text_helper) if 'Categoria 1' in df.columns else pd.Series([''] * len(df))
-    desc_norm = df['Descrição'].fillna('').astype(str).apply(normalize_text_helper) if 'Descrição' in df.columns else pd.Series([''] * len(df))
-    supp_norm = df['Nome do fornecedor/cliente'].fillna('').astype(str).apply(normalize_text_helper)
-    
-    # Combine all text fields
-    combined_text = cc_norm + ' ' + cat_norm + ' ' + desc_norm + ' ' + supp_norm
-    
-    # Check if any payroll keyword is present
-    payroll_mask = combined_text.apply(lambda text: any(keyword in text for keyword in PAYROLL_KEYWORDS))
-    
-    # Apply the wages cost center where payroll keywords are found
-    df.loc[payroll_mask, 'Centro de Custo 1'] = PAYROLL_COST_CENTER
+    # This enforces consistent categorization even if cost center is wrong in Conta Azul
+    payroll_keywords = [
+        'folha de pagamento', 'folha pagamento', 'folha',
+        'pro labore', 'pro-labore', 'pró labore', 'pró-labore',
+        'salario', 'salário', 'holerite',
+        'prestador de servico pj', 'payroll'
+    ]
+
+    def enforce_wages_cost_center(row):
+        """
+        Detect and reroute payroll transactions to 'Wages Expenses' cost center.
+        
+        Searches for payroll keywords in Categoria, Descrição, and Fornecedor fields.
+        Overrides Centro de Custo if payroll indicators found.
+        """
+        current_cc = str(row.get('Centro de Custo 1', '') or '').strip()
+        cc_norm = normalize_text_helper(current_cc)
+
+        # Already correctly tagged - no change needed
+        if cc_norm == 'wages expenses':
+            return 'Wages Expenses'
+
+        # Build combined search text from multiple fields
+        combined_text = ' '.join([
+            normalize_text_helper(row.get('Categoria 1', '')),
+            normalize_text_helper(row.get('Descrição', '')),
+            normalize_text_helper(row.get('Nome do fornecedor/cliente', ''))
+        ])
+
+        # Check if any payroll keyword appears in combined text
+        if any(keyword in combined_text for keyword in payroll_keywords):
+            return 'Wages Expenses'
+
+        # No payroll indicators - keep original cost center
+        return current_cc
+
+    df['Centro de Custo 1'] = df.apply(enforce_wages_cost_center, axis=1)
 
     return df
 
 def get_initial_mappings() -> List[MappingItem]:
     """
-    Returns the initial hardcoded mappings.
-    Now includes generic fallbacks and coverage for Taxes, Refunds, etc.
+    Return predefined mappings from cost centers/suppliers to P&L line items.
+    
+    Defines how transactions from Conta Azul are categorized into specific P&L
+    statement lines. Includes both specific mappings (cost center + supplier)
+    and generic fallback mappings (cost center + "Diversos").
+    
+    Returns:
+        List of MappingItem objects containing:
+            - grupo_financeiro: Financial group name
+            - centro_custo: Cost center from Conta Azul
+            - fornecedor_cliente: Supplier/client name (or "Diversos" for generic)
+            - linha_pl: P&L line number (as string)
+            - tipo: Transaction type (Receita/Custo/Despesa)
+            - ativo: Active status ("Sim")
+            - observacoes: Human-readable description
+            
+    Notes:
+        - Line 25: Google Play Revenue
+        - Line 33: App Store Revenue
+        - Line 38: Investment Income
+        - Line 43-48: Web Services COGS
+        - Line 56: Marketing Expenses
+        - Line 62: Wages/Salaries
+        - Line 68: Tech Support
+        - Line 90: Other Expenses (Legal, Accounting, Office, Taxes, etc.)
+        - Generic "Diversos" mappings serve as fallbacks when specific supplier not matched
     """
     # Helper to condense definition
     def m(cc, supp, line, tipo, obs):
@@ -400,107 +360,48 @@ def get_initial_mappings() -> List[MappingItem]:
         )
 
     mappings = [
-        # RECEITAS (Revenues) - CORRIGIDO: usar nomes do Conta Azul
-        m("Google Play Net Revenue", "GOOGLE BRASIL PAGAMENTOS LTDA", 25, "Receita", "Receita Google Play"),
-        m("Google Play Net Revenue", "Diversos", 25, "Receita", "Google Play - Generic"),
-        
-        # Google Play (alternative naming - normalized to same canonical form)
-        m("Google Play", "Diversos", 25, "Receita", "Google Play - Generic"),
-        m("Google Play Revenue", "Diversos", 25, "Receita", "Google Play Revenue - Generic"),
-        
-        m("App Store Net Revenue", "App Store (Apple)", 33, "Receita", "Receita App Store"),
-        m("App Store Net Revenue", "Diversos", 33, "Receita", "App Store - Generic"),
-        
-        # App Store (alternative naming - normalized to same canonical form)
-        m("App Store", "Diversos", 33, "Receita", "App Store - Generic"),
-        m("App Store Revenue", "Diversos", 33, "Receita", "App Store Revenue - Generic"),
-        
+        # RECEITAS (Revenues)
+        m("Receita Google", "GOOGLE BRASIL PAGAMENTOS LTDA", 25, "Receita", "Receita Google Play"),
+        m("Receita Apple", "App Store (Apple)", 33, "Receita", "Receita App Store"),
         m("Rendimentos de Aplicações", "CONTA SIMPLES", 38, "Receita", "Rendimentos CDI"),
         m("Rendimentos de Aplicações", "BANCO INTER", 38, "Receita", "Rendimentos Inter"),
-        m("Rendimentos de Aplicações", "Diversos", 38, "Receita", "Rendimentos - Generic"),
-        
-        # Rendimentos (alternative naming - normalized to same canonical form)
-        m("Rendimentos", "Diversos", 38, "Receita", "Rendimentos - Generic"),
-        m("Investimentos", "Diversos", 38, "Receita", "Investimentos - Generic"),
-        m("Investment Income", "Diversos", 38, "Receita", "Investment Income - Generic"),
         
         # COGS (Direct Costs)
-        # Web Services Expenses
+        # Specific
         m("Web Services Expenses", "AWS", 43, "Custo", "Amazon Web Services"),
         m("Web Services Expenses", "Cloudflare", 44, "Custo", "Cloudflare"),
         m("Web Services Expenses", "Heroku", 45, "Custo", "Heroku"),
         m("Web Services Expenses", "IAPHUB", 46, "Custo", "IAPHUB"),
         m("Web Services Expenses", "MailGun", 47, "Custo", "MailGun"),
         m("Web Services Expenses", "AWS SES", 48, "Custo", "AWS SES"),
+        # Generic
         m("Web Services Expenses", "Diversos", 43, "Custo", "Web Services - Generic"),
-        
-        # Web Services (alternative naming - normalized to same canonical form)
-        m("Web Services", "Diversos", 43, "Custo", "Web Services - Generic"),
-        m("Cloud Services", "Diversos", 43, "Custo", "Cloud Services - Generic"),
-        m("Hosting", "Diversos", 43, "Custo", "Hosting - Generic"),
 
         # SG&A (Operating Expenses)
-        # Marketing & Growth Expenses
+        # Marketing
         m("Marketing & Growth Expenses", "MGA MARKETING LTDA", 56, "Despesa", "Marketing Agency"),
-        m("Marketing & Growth Expenses", "GOOGLE ADS", 56, "Despesa", "Google Ads"),
-        m("Marketing & Growth Expenses", "FACEBOOK", 56, "Despesa", "Facebook Ads"),
         m("Marketing & Growth Expenses", "Diversos", 56, "Despesa", "Marketing - Generic"),
         
-        # Marketing (alternative naming - normalized to same canonical form)
-        m("Marketing", "Diversos", 56, "Despesa", "Marketing - Generic"),
-        m("Marketing Expenses", "Diversos", 56, "Despesa", "Marketing Expenses - Generic"),
-        m("Growth Expenses", "Diversos", 56, "Despesa", "Growth Expenses - Generic"),
-        
-        # Wages Expenses
+        # Wages
         m("Wages Expenses", "Diversos", 62, "Despesa", "Salários e Pró-labore"),
         
-        # Wages (alternative naming - normalized to same canonical form)
-        m("Wages", "Diversos", 62, "Despesa", "Wages - Generic"),
-        m("Salaries", "Diversos", 62, "Despesa", "Salaries - Generic"),
-        m("Salários", "Diversos", 62, "Despesa", "Salários - Generic"),
-        m("Payroll", "Diversos", 62, "Despesa", "Payroll - Generic"),
-        
-        # Tech Support & Services
-        # Specific suppliers
+        # Tech Support
         m("Tech Support & Services", "Adobe", 68, "Despesa", "Adobe Creative Cloud"),
         m("Tech Support & Services", "Canva", 68, "Despesa", "Canva"),
         m("Tech Support & Services", "ClickSign", 68, "Despesa", "ClickSign"),
         m("Tech Support & Services", "COMPANYHERO", 68, "Despesa", "Company Hero"),
-        m("Tech Support & Services", "ZENDESK", 65, "Despesa", "Zendesk Support"),
         m("Tech Support & Services", "Diversos", 65, "Despesa", "Tech Support - Generic"),
         
-        # Tech Support (alternative naming - normalized to same canonical form)
-        m("Tech Support", "Adobe", 68, "Despesa", "Adobe - Alternative Naming"),
-        m("Tech Support", "Canva", 68, "Despesa", "Canva - Alternative Naming"),
-        m("Tech Support", "ZENDESK", 65, "Despesa", "Zendesk - Alternative Naming"),
-        m("Tech Support", "Diversos", 65, "Despesa", "Tech Support - Generic"),
-        
-        # Technical Support (another variation)
-        m("Technical Support", "Diversos", 65, "Despesa", "Technical Support - Generic"),
-        
-        # Support Services (another variation)
-        m("Support Services", "Diversos", 65, "Despesa", "Support Services - Generic"),
-        
         # OTHER EXPENSES / TAXES
-        # Legal & Accounting Expenses
+        # Legal & Accounting
         m("Legal & Accounting Expenses", "BHUB.AI", 90, "Despesa", "BPO Financeiro"),
         m("Legal & Accounting Expenses", "WOLFF", 90, "Despesa", "Honorários Advocatícios"),
         m("Legal & Accounting Expenses", "Diversos", 90, "Despesa", "Legal & Accounting - Generic"),
-        
-        # Legal (alternative naming - normalized to same canonical form)
-        m("Legal", "Diversos", 90, "Despesa", "Legal - Generic"),
-        m("Legal Expenses", "Diversos", 90, "Despesa", "Legal Expenses - Generic"),
-        m("Accounting", "Diversos", 90, "Despesa", "Accounting - Generic"),
-        m("Accounting Expenses", "Diversos", 90, "Despesa", "Accounting Expenses - Generic"),
 
-        # Office Expenses
+        # Office
         m("Office Expenses", "GO OFFICES", 90, "Despesa", "Aluguel"),
         m("Office Expenses", "CO-SERVICES", 90, "Despesa", "Serviços de Escritório"),
         m("Office Expenses", "Diversos", 90, "Despesa", "Office Expenses - Generic"),
-        
-        # Office (alternative naming - normalized to same canonical form)
-        m("Office", "Diversos", 90, "Despesa", "Office - Generic"),
-        m("Escritório", "Diversos", 90, "Despesa", "Escritório - Generic"),
 
         # Travel
         m("Travel", "American Airlines", 90, "Despesa", "Viagens"),
@@ -519,7 +420,55 @@ def get_initial_mappings() -> List[MappingItem]:
     ]
     return mappings
 
+def normalize_text_helper(s: Any) -> str:
+    """
+    Normalize text for consistent case-insensitive matching.
+    
+    Converts to lowercase, strips whitespace, and removes diacritical marks
+    (accents) to enable robust fuzzy matching of cost centers and supplier names.
+    
+    Args:
+        s: Input string or value to normalize (can be NaN, None, or any type).
+        
+    Returns:
+        Normalized lowercase string without accents, or empty string for NaN/None.
+        
+    Examples:
+        >>> normalize_text_helper("São Paulo  ")
+        'sao paulo'
+        >>> normalize_text_helper("TÉCNICO")
+        'tecnico'
+        >>> normalize_text_helper(None)
+        ''
+    """
+    if pd.isna(s):
+        return ""
+    s = str(s).strip().lower()
+    s = unicodedata.normalize("NFKD", s)
+    return "".join(ch for ch in s if not unicodedata.combining(ch))
+
 def prepare_mappings(mappings: List[MappingItem]):
+    """
+    Optimize mappings for fast lookup during P&L calculation.
+    
+    Separates mappings into two categories for efficient matching:
+    1. Specific mappings: cost center + specific supplier
+    2. Generic mappings: cost center + "Diversos" (fallback)
+    
+    Args:
+        mappings: List of MappingItem objects from get_initial_mappings().
+        
+    Returns:
+        Tuple of (specific_by_cc, generic_by_cc):
+            - specific_by_cc: Dict[str, List[MappingItem]] indexed by normalized cost center,
+              sorted by supplier name length (longest first for most specific match)
+            - generic_by_cc: Dict[str, MappingItem] indexed by normalized cost center
+              
+    Notes:
+        - O(1) lookup by cost center instead of O(n) linear search
+        - Longest supplier match first prevents "AWS" matching "AWS SES"
+        - Generic mappings provide fallback when specific supplier not found
+    """
     from collections import defaultdict
     
     # Use defaultdict(list) for specific mappings to handle multiple patterns for same CC
@@ -527,8 +476,7 @@ def prepare_mappings(mappings: List[MappingItem]):
     generic_by_cc = {}
 
     for m in mappings:
-        # Use enhanced normalization that handles synonyms
-        cc = normalize_cost_center(m.centro_custo)
+        cc = normalize_text_helper(m.centro_custo)
         supp = normalize_text_helper(m.fornecedor_cliente)
 
         if supp and supp != "diversos":
@@ -546,8 +494,48 @@ def prepare_mappings(mappings: List[MappingItem]):
 
 def calculate_pnl(df: pd.DataFrame, mappings: List[MappingItem], overrides: Dict[str, Dict[str, float]] = None, start_date: str = None, end_date: str = None) -> PnLResponse:
     """
-    Calculate P&L based on dataframe and mappings.
-    Optionally filter by date range.
+    Calculate comprehensive Profit & Loss statement from transaction data.
+    
+    Maps transactions to P&L line items, aggregates by month, computes derived
+    financial metrics (EBITDA, margins, etc.), and formats for display.
+    
+    Args:
+        df: Processed DataFrame from process_upload() with transaction data.
+        mappings: List of MappingItem objects defining cost center to P&L line mappings.
+        overrides: Optional manual overrides for specific lines and months.
+            Format: {"line_num": {"month_str": value}}
+            Only lines 100 (Revenue), 106 (EBITDA), 111 (Net Result) allowed.
+        start_date: Optional ISO date string (YYYY-MM-DD) for filtering.
+        end_date: Optional ISO date string (YYYY-MM-DD) for filtering.
+        
+    Returns:
+        PnLResponse containing:
+            - headers: List of month strings (YYYY-MM format)
+            - rows: List of PnLItem objects with line details and monthly values
+            
+    Raises:
+        No exceptions raised; returns empty response if df is None/empty.
+        
+    Side Effects:
+        - Logs monthly totals (Revenue, EBITDA) at INFO level
+        - Logs large matches (>R$20k) at INFO level for debugging
+        - Logs unmapped significant items (>R$10k) at DEBUG level
+        
+    Financial Calculations:
+        1. Total Revenue = Google + Apple + Investment Income
+        2. Payment Processing = Revenue (no tax) × 17.65%
+        3. COGS = Web Services expenses
+        4. Gross Profit = Revenue - Payment Processing - COGS
+        5. SG&A = Marketing + Wages + Tech Support
+        6. Total OpEx = SG&A + Other Expenses
+        7. EBITDA = Gross Profit - Total OpEx
+        8. Net Result = EBITDA (simplified, no D&A or taxes)
+        
+    Notes:
+        - Revenue values preserve sign (negative for refunds/chargebacks)
+        - Expenses displayed as negative in P&L
+        - Margins calculated as percentage of total revenue
+        - Unmapped transactions are ignored (logged at DEBUG level)
     """
     if df is None or df.empty:
         return PnLResponse(headers=[], rows=[])
@@ -564,38 +552,31 @@ def calculate_pnl(df: pd.DataFrame, mappings: List[MappingItem], overrides: Dict
 
     # Calculate months from filtered data
     months = sorted(filtered_df['Mes_Competencia'].dropna().unique())
-    
-    # Limit to last 120 months (10 years) for performance and practical display limits
-    # This prevents memory issues with very long historical data
-    if len(months) > 120:
-        months = months[-120:]
-    
     month_strs = [str(m) for m in months]
 
-    # Initialize data structure for calculations with defaultdict for dynamic P&L lines
-    # This allows supporting 20,000+ P&L lines without pre-allocating memory
-    from collections import defaultdict
-    line_values = defaultdict(lambda: {m: 0.0 for m in month_strs})
+    # Initialize data structure for calculations
+    # line_values[line_num][month_str] = value
+    line_values = {i: {m: 0.0 for m in month_strs} for i in range(1, 121)}
 
-    # Optimize Mapping Lookups
+    # Optimize Mapping Lookups - O(1) by cost center instead of O(n) linear search
     specific_mappings, generic_mappings = prepare_mappings(mappings)
 
     # DataFrame Enhancement for Matching
-    # Ensure necessary columns exist for detailed matching
+    # Pre-compute normalized columns for performance (vectorized operations)
     if 'Descrição' not in filtered_df.columns:
         filtered_df['Descrição'] = ''
     
-    # Create normalized columns for robust matching (without modifying original too much)
-    # We use vectorization for performance
-    # Use normalize_cost_center for cost centers to handle synonyms
-    filtered_df['cc_norm'] = filtered_df['Centro de Custo 1'].fillna('').apply(normalize_cost_center)
+    # Normalize all text fields used in matching (case-insensitive, no accents)
+    filtered_df['cc_norm'] = filtered_df['Centro de Custo 1'].fillna('').apply(normalize_text_helper)
     filtered_df['supp_norm'] = filtered_df['Nome do fornecedor/cliente'].fillna('').apply(normalize_text_helper)
     filtered_df['desc_norm'] = filtered_df['Descrição'].fillna('').apply(normalize_text_helper)
     
-    # Combined text for looser matching (Supplier + Description)
+    # Combined search text: supplier + description for substring matching
+    # Enables matching supplier name mentioned in description field
     filtered_df['match_text'] = (filtered_df['supp_norm'] + " " + filtered_df['desc_norm']).str.strip()
 
-    # Iterate through DataFrame
+    # Iterate through transactions and match to P&L lines
+    # Uses hierarchical matching strategy: Specific → Generic → Categoria fallback
     for _, row in filtered_df.iterrows():
         month = str(row['Mes_Competencia'])
         if month not in month_strs:
@@ -607,114 +588,163 @@ def calculate_pnl(df: pd.DataFrame, mappings: List[MappingItem], overrides: Dict
         
         matched_mapping = None
         
-        # 1. Try Specific Mappings within the matching Cost Center
-        # Get candidate mappings for this Cost Center (using normalized/canonical CC)
+        # === Hierarchical Matching Strategy ===
+        
+        # Level 1: Specific Mappings (Cost Center + Supplier substring match)
+        # Try to match specific supplier within the cost center
+        # Sorted by length (longest first) to match most specific pattern
         candidates = specific_mappings.get(cc, [])
         for m in candidates:
             m_supp_norm = normalize_text_helper(m.fornecedor_cliente)
-            # Check if filtered supplier token exists in the row's supplier OR description
+            # Substring match: check if supplier name appears in combined text
+            # Example: "aws" in "aws ireland" OR "paid to aws"
             if m_supp_norm in match_text:
                 matched_mapping = m
                 break
         
-        # 2. If no specific match, try Generic Mapping for this Cost Center
+        # Level 2: Generic Mapping (Cost Center + "Diversos")
+        # Fallback if no specific supplier matched
         if not matched_mapping:
             matched_mapping = generic_mappings.get(cc)
         
-        # 3. Fallback: If still no match, try 'Categoria 1' as Cost Center (if available)
+        # Level 3: Categoria 1 Fallback
+        # If cost center didn't match, try Categoria 1 as alternative grouping
         if not matched_mapping and 'Categoria 1' in row:
             cat_cc = normalize_text_helper(row['Categoria 1'])
-            # Try specific
+            # Try specific mappings for categoria
             candidates_cat = specific_mappings.get(cat_cc, [])
             for m in candidates_cat:
                 m_supp_norm = normalize_text_helper(m.fornecedor_cliente)
                 if m_supp_norm in match_text:
                     matched_mapping = m
                     break
-            # Try generic
+            # Try generic mapping for categoria
             if not matched_mapping:
                 matched_mapping = generic_mappings.get(cat_cc)
 
-        # 4. If match found, accumulate
+        # Accumulate value to matched P&L line
         if matched_mapping:
             try:
                 line_num = int(matched_mapping.linha_pl)
                 line_values[line_num][month] += val
                 
-                # DEBUG: Log large matches (only in debug mode for performance)
-                if logger.isEnabledFor(logging.DEBUG) and abs(val) > 20000:
+                # DEBUG: Log large transactions for audit trail
+                if abs(val) > 20000:
                     description = matched_mapping.observacoes
-                    logger.debug(f"MATCH: Line {line_num} ({description}) | Val: {val:.2f} | Basis: '{match_text}' matched '{matched_mapping.fornecedor_cliente}'")
+                    logger.info(f"MATCH: Line {line_num} ({description}) | Val: {val:.2f} | Basis: '{match_text}' matched '{matched_mapping.fornecedor_cliente}'")
             except:
+                # Silently skip invalid line numbers
                 continue
         else:
-            # Optionally log unmapped significant items
+            # Log unmapped significant transactions for review
+            # These transactions won't appear in P&L
             if abs(val) > 10000:
                 logger.debug(f"UNMAPPED: {val:.2f} | CC: {cc} | Text: {match_text}")
 
     # ========================================================================
-    # CALCULATE DERIVED VALUES FOR EACH MONTH
+    # CALCULATE DERIVED FINANCIAL METRICS FOR EACH MONTH
     # ========================================================================
+    # Aggregates raw line values into standard P&L structure following
+    # accounting conventions: Revenue - COGS = Gross Profit - OpEx = EBITDA
     
     for m in month_strs:
         
         # ============================================
-        # FINANCIAL CALCULATIONS
+        # STEP 1: REVENUE AGGREGATION
         # ============================================
+        # Line 25: Google Play Revenue (from Conta Azul)
+        # Line 33: App Store Revenue (from Conta Azul)
+        # Line 38: Investment Income (interest, CDI yields)
+        # Line 49: Miscellaneous revenue (if any)
         
-        # 1. TOTAL REVENUE (Preserve sign for refunds/chargebacks)
-        google_rev = line_values[25].get(m, 0.0)
-        apple_rev = line_values[33].get(m, 0.0)
-        # Line 38 (Rendimentos) + Line 49 (Possible misc revenue)
-        invest_income = line_values[38].get(m, 0.0) + line_values[49].get(m, 0.0)
+        # NOTE: abs() used here enforces positive revenue display convention
+        # Refunds are mapped to Line 90 (Other Expenses) to preserve revenue as gross sales
+        # See logic_CORRECTED.py for version that preserves sign for net revenue calculation
+        google_rev = abs(line_values[25].get(m, 0.0))
+        apple_rev = abs(line_values[33].get(m, 0.0))
+        invest_income = abs(line_values[38].get(m, 0.0)) + abs(line_values[49].get(m, 0.0))
         
         total_revenue = google_rev + apple_rev + invest_income
-        revenue_no_tax = google_rev + apple_rev
+        revenue_no_tax = google_rev + apple_rev  # Excludes investment income for fee calculation
         
-        # 2. PAYMENT PROCESSING (17.65%)
-        # When revenue is negative (refunds), payment_processing_cost is also negative.
-        # In gross_profit calculation, subtracting negative cost correctly adds it back (fee refund).
-        payment_processing_rate = 0.1765
+        # ============================================
+        # STEP 2: PAYMENT PROCESSING FEES
+        # ============================================
+        # Google and Apple charge 17.65% combined fees
+        # (15% platform fee + additional processing fees)
+        # Investment income doesn't incur these fees
+        
+        payment_processing_rate = 0.1765  # 17.65% hardcoded rate
         payment_processing_cost = revenue_no_tax * payment_processing_rate
         
-        # 3. COGS
+        # ============================================
+        # STEP 3: COST OF GOODS SOLD (COGS)
+        # ============================================
+        # Lines 43-48: Web Services (AWS, Cloudflare, Heroku, IAPHUB, MailGun, AWS SES)
+        # Direct costs attributable to delivering the service
+        
         cogs_sum = sum(abs(line_values[i].get(m, 0.0)) for i in range(43, 49))
         
-        # 4. GROSS PROFIT
+        # ============================================
+        # STEP 4: GROSS PROFIT
+        # ============================================
+        # Revenue minus all direct costs (payment processing + COGS)
+        
         gross_profit = total_revenue - payment_processing_cost - cogs_sum
         
-        # 5. OPEX
+        # ============================================
+        # STEP 5: OPERATING EXPENSES (OpEx)
+        # ============================================
+        # Line 56: Marketing & Growth
+        # Line 62: Wages (salaries, pro-labore, payroll)
+        # Lines 65, 68: Tech Support & Services (Adobe, Canva, etc.)
+        # Line 90: Other Expenses (legal, accounting, office, taxes, refunds)
+        
         marketing_abs = abs(line_values[56].get(m, 0.0))
         wages_abs = abs(line_values[62].get(m, 0.0))
-        # Tech Support: 68 + 65
         tech_support_abs = abs(line_values[68].get(m, 0.0)) + abs(line_values[65].get(m, 0.0))
         other_expenses_abs = abs(line_values[90].get(m, 0.0))
         
+        # SG&A: Selling, General & Administrative expenses
         sga_total = marketing_abs + wages_abs + tech_support_abs
         total_opex = sga_total + other_expenses_abs
         
-        # 6. EBITDA
+        # ============================================
+        # STEP 6: EBITDA (Operating Profit)
+        # ============================================
+        # Earnings Before Interest, Taxes, Depreciation, Amortization
+        # Simplified: no D&A or interest in this model
+        
         ebitda = gross_profit - total_opex
         
-        # 7. NET RESULT
+        # ============================================
+        # STEP 7: NET RESULT
+        # ============================================
+        # Simplified: EBITDA = Net Result (no taxes, D&A, or interest modeled)
+        
         net_result = ebitda
         
-        # Store for Display (Revenues +, Expenses -)
-        line_values[100][m] = total_revenue
-        line_values[101][m] = revenue_no_tax
-        line_values[112][m] = google_rev
-        line_values[113][m] = apple_rev
-        line_values[102][m] = -payment_processing_cost
-        line_values[103][m] = -cogs_sum
-        line_values[104][m] = gross_profit
-        line_values[105][m] = -sga_total
-        line_values[106][m] = ebitda
-        line_values[107][m] = -marketing_abs
-        line_values[108][m] = -wages_abs
-        line_values[109][m] = -tech_support_abs
-        line_values[110][m] = -other_expenses_abs
-        line_values[111][m] = net_result
+        # ============================================
+        # STORE CALCULATED VALUES FOR DISPLAY
+        # ============================================
+        # Convention: Revenue positive, Expenses negative
         
+        line_values[100][m] = total_revenue           # Total Revenue
+        line_values[101][m] = revenue_no_tax          # Revenue (no investment income)
+        line_values[112][m] = google_rev              # Google Play breakdown
+        line_values[113][m] = apple_rev               # App Store breakdown
+        line_values[102][m] = -payment_processing_cost  # Payment fees (negative)
+        line_values[103][m] = -cogs_sum               # COGS (negative)
+        line_values[104][m] = gross_profit            # Gross Profit (positive)
+        line_values[105][m] = -sga_total              # SG&A (negative)
+        line_values[106][m] = ebitda                  # EBITDA (can be negative)
+        line_values[107][m] = -marketing_abs          # Marketing detail (negative)
+        line_values[108][m] = -wages_abs              # Wages detail (negative)
+        line_values[109][m] = -tech_support_abs       # Tech support detail (negative)
+        line_values[110][m] = -other_expenses_abs     # Other expenses detail (negative)
+        line_values[111][m] = net_result              # Net Result
+        
+        # Log monthly summary for audit/debugging
         logger.info(f"Month {m}: Rev={total_revenue:.2f}, EBITDA={ebitda:.2f}")
 
     # APPLY OVERRIDES (Restricted to Final Lines)
@@ -785,6 +815,48 @@ def calculate_pnl(df: pd.DataFrame, mappings: List[MappingItem], overrides: Dict
 
     return PnLResponse(headers=month_strs, rows=rows)
 def get_dashboard_data(df: pd.DataFrame, mappings: List[MappingItem], overrides: Dict[str, Dict[str, float]] = None) -> DashboardData:
+    """
+    Generate dashboard metrics and visualizations data from P&L.
+    
+    Aggregates P&L data into year-to-date KPIs, monthly trends, and cost structure
+    breakdown for dashboard display.
+    
+    Args:
+        df: Processed DataFrame from process_upload().
+        mappings: List of MappingItem objects.
+        overrides: Optional manual overrides (same format as calculate_pnl).
+        
+    Returns:
+        DashboardData containing:
+            - kpis: Dict with YTD aggregated metrics:
+                * total_revenue: Sum across all months
+                * net_result: Sum of net results
+                * ebitda: Sum of EBITDA
+                * ebitda_margin: Percentage (EBITDA / Revenue)
+                * gross_margin: Percentage (Gross Profit / Revenue)
+                * google_revenue: Sum of Google Play revenue
+                * apple_revenue: Sum of App Store revenue
+                * nau: Placeholder (0)
+                * cpa: Placeholder (0)
+            - monthly_data: List of dicts with per-month breakdown:
+                * month: Month string (YYYY-MM)
+                * revenue: Revenue for month
+                * ebitda: EBITDA for month
+                * costs: COGS (absolute value for positive display)
+                * expenses: OpEx (absolute value for positive display)
+            - cost_structure: Dict with latest month breakdown (absolute values):
+                * payment_processing: Payment processing fees
+                * cogs: Web services costs
+                * marketing: Marketing expenses
+                * wages: Salary expenses
+                * tech: Tech support expenses
+                * other: Other expenses
+                
+    Notes:
+        - Returns empty structure if df is None
+        - All cost/expense values converted to positive for chart display
+        - Finds latest month with non-zero revenue for cost structure
+    """
     if df is None:
         return DashboardData(kpis={}, monthly_data=[], cost_structure={})
         
@@ -837,16 +909,18 @@ def get_dashboard_data(df: pd.DataFrame, mappings: List[MappingItem], overrides:
         total_google += get_val_by_line(21, m)
         total_apple += get_val_by_line(22, m)
     
-    net_result = total_ebitda  # Simplified calculation (validated)
+    total_net_result = 0.0
+    for m in pnl.headers:
+        total_net_result += get_val_by_line(16, m)      # (=) RESULTADO LÍQUIDO
     
-    # Avoid division by zero - calculate margins as percentages
-    ebitda_margin = (total_ebitda / total_revenue) * 100 if total_revenue > 0 else 0.0
-    gross_margin = (total_gross_profit / total_revenue) * 100 if total_revenue > 0 else 0.0
+    # Avoid division by zero
+    ebitda_margin = (total_ebitda / total_revenue) if total_revenue > 0 else 0.0
+    gross_margin = (total_gross_profit / total_revenue) if total_revenue > 0 else 0.0
     
     # KPIs
     kpis = {
         "total_revenue": total_revenue,
-        "net_result": net_result,
+        "net_result": total_net_result,
         "ebitda": total_ebitda,
         "ebitda_margin": ebitda_margin,
         "gross_margin": gross_margin,
@@ -890,7 +964,35 @@ def get_dashboard_data(df: pd.DataFrame, mappings: List[MappingItem], overrides:
 
 def calculate_forecast(df: pd.DataFrame, mappings: List[MappingItem], overrides: Dict[str, Dict[str, float]] = None, months_ahead: int = 3) -> Dict[str, Any]:
     """
-    Predict future financial metrics (Revenue, EBITDA) using Linear Regression.
+    Predict future financial metrics using linear regression on historical data.
+    
+    Trains separate linear models on revenue and EBITDA time series to forecast
+    future months. Useful for simple trend projection.
+    
+    Args:
+        df: Processed DataFrame from process_upload().
+        mappings: List of MappingItem objects.
+        overrides: Optional manual overrides (same format as calculate_pnl).
+        months_ahead: Number of future months to forecast (default: 3).
+        
+    Returns:
+        Dict containing:
+            - forecast: List of dicts with predictions:
+                * month: Future month string (YYYY-MM)
+                * revenue: Predicted revenue (minimum 0)
+                * ebitda: Predicted EBITDA
+                * is_forecast: Always True
+            - warning: Optional message if insufficient data (<3 months)
+            
+    Raises:
+        No exceptions; returns empty forecast list if insufficient data.
+        
+    Notes:
+        - Requires at least 3 historical months for reliable prediction
+        - Uses sklearn LinearRegression (simple least-squares fit)
+        - Revenue forecast clamped to non-negative values
+        - EBITDA forecast can be negative
+        - Simple linear model may not capture seasonality or non-linear trends
     """
     if df is None:
         return {"forecast": []}
